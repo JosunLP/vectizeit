@@ -79,7 +79,7 @@ fn build_path_data(contours: &[Contour], config: &TracingConfig) -> String {
 
         let path = if config.smoothing_strength > 0.01 {
             // Use cubic Bezier curves for smoother output
-            build_bezier_path(&simplified, config.smoothing_strength)
+            build_bezier_path(&simplified, config.smoothing_strength, config.corner_sensitivity)
         } else {
             // Use straight line segments
             build_linear_path(&simplified)
@@ -106,8 +106,8 @@ fn build_linear_path(points: &[Point]) -> String {
 }
 
 /// Build a path using cubic Bezier curves.
-fn build_bezier_path(points: &[Point], smoothing: f64) -> String {
-    let beziers = fit_cubic_beziers(points, smoothing);
+fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) -> String {
+    let beziers = fit_cubic_beziers(points, smoothing, corner_sensitivity);
     if beziers.is_empty() {
         return build_linear_path(points);
     }

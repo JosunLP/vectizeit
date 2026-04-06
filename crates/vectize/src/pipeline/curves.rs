@@ -1,7 +1,8 @@
 //! Bezier curve fitting and smoothing for polygon paths.
 //!
 //! Converts simplified polylines into smooth cubic Bezier splines
-//! for cleaner SVG output.
+//! for cleaner SVG output. Supports corner detection to preserve
+//! sharp angles while smoothing gentle curves.
 
 use crate::pipeline::contour::Point;
 
@@ -17,7 +18,12 @@ pub struct CubicBezier {
 /// Fit a smooth cubic Bezier spline through the given points.
 ///
 /// `smoothing` controls the tension: 0.0 = straight lines, 1.0 = maximum smoothing.
-pub fn fit_cubic_beziers(points: &[Point], smoothing: f64) -> Vec<CubicBezier> {
+/// `corner_sensitivity` controls corner detection: 0.0 = smooth all, 1.0 = preserve all corners.
+pub fn fit_cubic_beziers(
+    points: &[Point],
+    smoothing: f64,
+    corner_sensitivity: f64,
+) -> Vec<CubicBezier> {
     if points.len() < 2 {
         return Vec::new();
     }
@@ -36,29 +42,77 @@ pub fn fit_cubic_beziers(points: &[Point], smoothing: f64) -> Vec<CubicBezier> {
         }];
     }
 
+    // Detect corners based on angle between consecutive segments
+    let corners = detect_corners(&pts, corner_sensitivity);
+
     let mut segments = Vec::new();
 
     for i in 0..n - 1 {
         let p0 = pts[i];
         let p3 = pts[i + 1];
 
+        // If either endpoint is a detected corner, reduce smoothing
+        let local_tension = if corners[i] || corners[i + 1] {
+            tension * 0.15 // nearly straight at corners
+        } else {
+            tension
+        };
+
         // Catmull-Rom tangent vectors
         let prev = if i > 0 { pts[i - 1] } else { p0 };
         let next = if i + 2 < n { pts[i + 2] } else { p3 };
 
         let p1 = (
-            p0.0 + tension * (p3.0 - prev.0),
-            p0.1 + tension * (p3.1 - prev.1),
+            p0.0 + local_tension * (p3.0 - prev.0),
+            p0.1 + local_tension * (p3.1 - prev.1),
         );
         let p2 = (
-            p3.0 - tension * (next.0 - p0.0),
-            p3.1 - tension * (next.1 - p0.1),
+            p3.0 - local_tension * (next.0 - p0.0),
+            p3.1 - local_tension * (next.1 - p0.1),
         );
 
         segments.push(CubicBezier { p0, p1, p2, p3 });
     }
 
     segments
+}
+
+/// Detect corner points based on the angle between consecutive segments.
+///
+/// Returns a boolean for each point: `true` if the point is a sharp corner.
+/// `sensitivity`: 0.0 = no corners detected, 1.0 = aggressively detect corners.
+fn detect_corners(pts: &[(f64, f64)], sensitivity: f64) -> Vec<bool> {
+    let n = pts.len();
+    let mut corners = vec![false; n];
+
+    if n < 3 || sensitivity <= 0.0 {
+        return corners;
+    }
+
+    // Angle threshold: higher sensitivity → more corners detected (higher threshold)
+    // sensitivity=1.0 → threshold=cos(60°) = 0.5 (very aggressive)
+    // sensitivity=0.6 → threshold=cos(84°) ≈ 0.1 (moderate, catches right angles)
+    // sensitivity=0.0 → threshold=cos(120°) = -0.5 (only sharp U-turns)
+    let cos_threshold = sensitivity - 0.5;
+
+    for i in 1..n - 1 {
+        let (ax, ay) = (pts[i].0 - pts[i - 1].0, pts[i].1 - pts[i - 1].1);
+        let (bx, by) = (pts[i + 1].0 - pts[i].0, pts[i + 1].1 - pts[i].1);
+
+        let len_a = (ax * ax + ay * ay).sqrt();
+        let len_b = (bx * bx + by * by).sqrt();
+
+        if len_a < 1e-10 || len_b < 1e-10 {
+            continue;
+        }
+
+        let cos_angle = (ax * bx + ay * by) / (len_a * len_b);
+        if cos_angle < cos_threshold {
+            corners[i] = true;
+        }
+    }
+
+    corners
 }
 
 fn lerp2(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
@@ -72,14 +126,36 @@ mod tests {
     #[test]
     fn two_points_produce_one_segment() {
         let pts = vec![Point::new(0, 0), Point::new(10, 10)];
-        let beziers = fit_cubic_beziers(&pts, 0.5);
+        let beziers = fit_cubic_beziers(&pts, 0.5, 0.6);
         assert_eq!(beziers.len(), 1);
     }
 
     #[test]
     fn n_points_produce_n_minus_1_segments() {
         let pts: Vec<Point> = (0..5).map(|i| Point::new(i * 10, 0)).collect();
-        let beziers = fit_cubic_beziers(&pts, 0.5);
+        let beziers = fit_cubic_beziers(&pts, 0.5, 0.6);
         assert_eq!(beziers.len(), 4);
+    }
+
+    #[test]
+    fn corner_detection_finds_right_angle() {
+        let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        let corners = detect_corners(&pts, 0.6);
+        assert!(corners[1]); // The 90-degree corner at (10, 0)
+    }
+
+    #[test]
+    fn corner_detection_ignores_gentle_curves() {
+        // Nearly straight line
+        let pts = vec![(0.0, 0.0), (5.0, 0.1), (10.0, 0.0)];
+        let corners = detect_corners(&pts, 0.6);
+        assert!(!corners[1]); // Not a corner
+    }
+
+    #[test]
+    fn zero_sensitivity_detects_no_corners() {
+        let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        let corners = detect_corners(&pts, 0.0);
+        assert!(corners.iter().all(|&c| !c));
     }
 }

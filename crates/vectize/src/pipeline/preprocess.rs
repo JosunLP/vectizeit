@@ -9,10 +9,15 @@ use crate::config::TracingConfig;
 ///
 /// Steps:
 /// 1. Convert to RGBA8 (normalizes bit depth)
-/// 2. Optionally apply Gaussian blur for denoising
-/// 3. Composite transparent pixels against white background (for non-alpha-aware tracing)
+/// 2. If preprocessing is enabled, optionally apply Gaussian blur for denoising
+///
+/// If `enable_preprocessing` is `false`, only the RGBA8 conversion is performed.
 pub fn preprocess(img: &DynamicImage, config: &TracingConfig) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let rgba = img.to_rgba8();
+
+    if !config.enable_preprocessing {
+        return rgba;
+    }
 
     if config.enable_denoising {
         gaussian_blur(&rgba, 0.8)
