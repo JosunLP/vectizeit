@@ -19,6 +19,7 @@ vectizeit/
 │   │   │   ├── lib.rs
 │   │   │   ├── error.rs
 │   │   │   ├── config.rs
+│   │   │   ├── result.rs
 │   │   │   └── pipeline/
 │   │   │       ├── mod.rs
 │   │   │       ├── loader.rs
@@ -29,7 +30,7 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (22 tests)
+│   │       └── integration_tests.rs  # API & golden tests (24 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
@@ -64,12 +65,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **62+ automated tests** across three categories:
+The project includes **65 automated tests** across three categories:
 
 | Category | Location | Tests |
 |----------|----------|-------|
-| Unit tests | Embedded in each module (`#[cfg(test)]`) | 22 |
-| Integration tests | `crates/vectize/tests/integration_tests.rs` | 22 |
+| Unit tests | Embedded in each module (`#[cfg(test)]`) | 23 |
+| Integration tests | `crates/vectize/tests/integration_tests.rs` | 24 |
 | CLI smoke tests | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17 |
 | Doc tests | `crates/vectize/src/lib.rs` | 1 |
 
@@ -95,8 +96,8 @@ trace convert input.png -o output.svg
 # Use the high-quality preset
 trace convert input.webp --preset high
 
-# Customize palette size, tolerance, and smoothing
-trace convert photo.jpg --colors 32 --tolerance 0.5 --smoothing 0.7
+# Customize palette size, tolerance, smoothing, corners, and despeckling
+trace convert photo.jpg --colors 32 --tolerance 0.5 --smoothing 0.7 --corner-sensitivity 0.8 --despeckle-threshold 1.5
 
 # Write SVG to stdout (useful for piping)
 trace convert input.png --stdout
@@ -109,22 +110,28 @@ trace convert noisy.png --denoise
 
 # Set a custom alpha threshold
 trace convert transparent.png --alpha-threshold 64
+
+# Disable preprocessing for already-clean source art
+trace convert logo.png --no-preprocess
 ```
 
 ### Batch conversion
 
 ```bash
 # Convert all PNG/JPEG/WebP files in a directory
-trace batch ./images/ ./vectors/
+trace batch ./images/ ./vectors/ --format svg
 
 # Use a quality preset for the whole batch
-trace batch ./images/ ./vectors/ --preset fast
+trace batch ./images/ ./vectors/ --format svg --preset fast
 
 # Overwrite any existing SVG files
-trace batch ./images/ ./vectors/ --overwrite
+trace batch ./images/ ./vectors/ --format svg --overwrite
 
 # Verbose output
-trace batch ./images/ ./vectors/ -v
+trace batch ./images/ ./vectors/ --format svg -v
+
+# Apply the same tracing overrides to every file in the batch
+trace batch ./images/ ./vectors/ --format svg --colors 24 --tolerance 0.6 --denoise
 ```
 
 ### Help
@@ -152,8 +159,8 @@ vectize = { path = "crates/vectize" }
 use vectize::{Tracer, QualityPreset};
 
 let tracer = Tracer::with_preset(QualityPreset::High);
-let svg = tracer.trace_file("input.png")?;
-std::fs::write("output.svg", svg)?;
+let result = tracer.trace_file_result("input.png")?;
+result.write_svg("output.svg", true)?;
 ```
 
 ### Custom configuration
@@ -172,6 +179,25 @@ let config = TracingConfig {
 
 let tracer = Tracer::new(config);
 let svg = tracer.trace_file("photo.jpg")?;
+```
+
+### Inspect debug-oriented tracing data
+
+```rust
+use vectize::{QualityPreset, Tracer};
+
+let tracer = Tracer::with_preset(QualityPreset::Balanced);
+let result = tracer.trace_file_result("input.png")?;
+
+println!("palette colors: {}", result.debug().palette().len());
+for region in result.debug().regions() {
+    println!(
+        "region {} contours={} points={}",
+        region.color().to_hex(),
+        region.contour_count(),
+        region.total_points()
+    );
+}
 ```
 
 ### Trace from bytes (e.g. from an HTTP response)
@@ -216,7 +242,7 @@ The library processes images in seven sequential stages:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `color_count` | `u8` | `16` | Number of palette colors (2–256) |
+| `color_count` | `u16` | `16` | Number of palette colors (2–256) |
 | `simplification_tolerance` | `f64` | `1.0` | RDP tolerance in pixels |
 | `min_region_area` | `f64` | `4.0` | Minimum polygon area to include |
 | `smoothing_strength` | `f64` | `0.5` | Bezier smoothing (0 = straight lines) |

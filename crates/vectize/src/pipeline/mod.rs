@@ -38,7 +38,10 @@ pub fn run_pipeline(img: &DynamicImage, config: &TracingConfig) -> Result<String
 }
 
 /// Run the complete vectorization pipeline and keep debug-oriented stage data.
-pub fn run_pipeline_with_debug(img: &DynamicImage, config: &TracingConfig) -> Result<TracingResult> {
+pub fn run_pipeline_with_debug(
+    img: &DynamicImage,
+    config: &TracingConfig,
+) -> Result<TracingResult> {
     debug!(
         "Pipeline: preprocessing image ({}×{})",
         img.width(),
