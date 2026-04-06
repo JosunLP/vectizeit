@@ -155,9 +155,14 @@ fn trace_bytes_result_exposes_debug_data() {
     assert!(result.svg().contains("<svg"));
     assert!(!result.debug().palette().is_empty());
     assert!(!result.debug().regions().is_empty());
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
     assert!(
         result.debug().regions()[0].hole_count() <= result.debug().regions()[0].contour_count()
     );
+    assert!(metrics.contours_extracted() >= metrics.contours_after_despeckle());
+    assert!(metrics.contours_after_despeckle() >= metrics.contours_emitted());
 }
 
 #[test]
@@ -195,9 +200,17 @@ fn trace_bytes_ring_image_preserves_hole() {
         .iter()
         .find(|region| region.color().to_hex() == "#000000")
         .expect("black ring region should exist");
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
 
     assert_eq!(black_region.contour_count(), 2);
     assert_eq!(black_region.hole_count(), 1);
+    assert!(metrics.contours_extracted() >= 2);
+    assert!(metrics.holes_extracted() >= 1);
+    assert!(metrics.holes_after_despeckle() >= 1);
+    assert!(metrics.holes_emitted() >= 1);
+    assert!(metrics.regions_emitted() >= 1);
     assert!(result.svg().contains(r#"fill-rule="evenodd""#));
 }
 

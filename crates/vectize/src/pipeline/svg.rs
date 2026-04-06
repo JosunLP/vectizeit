@@ -4,7 +4,7 @@
 //! elements, and deterministic output.
 
 use crate::config::TracingConfig;
-use crate::pipeline::contour::{Contour, Point};
+use crate::pipeline::contour::{contour_is_hole, Contour, Point};
 use crate::pipeline::curves::fit_cubic_beziers;
 use crate::pipeline::segment::PaletteColor;
 use crate::pipeline::simplify::simplify;
@@ -15,6 +15,28 @@ pub struct ColorRegion {
     pub contours: Vec<Contour>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SvgEmissionMetrics {
+    pub regions_emitted: usize,
+    pub contours_emitted: usize,
+    pub holes_emitted: usize,
+    pub points_emitted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SvgBuildResult {
+    pub svg: String,
+    pub metrics: SvgEmissionMetrics,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PathBuildResult {
+    data: String,
+    contours_emitted: usize,
+    holes_emitted: usize,
+    points_emitted: usize,
+}
+
 /// Generate an SVG document from color regions.
 pub fn generate_svg(
     regions: &[ColorRegion],
@@ -22,7 +44,17 @@ pub fn generate_svg(
     height: u32,
     config: &TracingConfig,
 ) -> String {
+    generate_svg_with_metrics(regions, width, height, config).svg
+}
+
+pub(crate) fn generate_svg_with_metrics(
+    regions: &[ColorRegion],
+    width: u32,
+    height: u32,
+    config: &TracingConfig,
+) -> SvgBuildResult {
     let mut svg = String::new();
+    let mut metrics = SvgEmissionMetrics::default();
 
     // SVG header
     svg.push_str(&format!(
@@ -41,24 +73,31 @@ pub fn generate_svg(
     for region in regions {
         let hex = region.color.to_hex();
 
-        let path_data = build_path_data(&region.contours, config);
-        if path_data.trim().is_empty() {
+        let path_result = build_path_data(&region.contours, config);
+        if path_result.data.trim().is_empty() {
             continue;
         }
 
         svg.push_str(&format!(
             r#"  <path fill="{hex}" fill-rule="evenodd" stroke="none" d="{path_data}"/>
-"#
+"#,
+            path_data = path_result.data
         ));
+
+        metrics.regions_emitted += 1;
+        metrics.contours_emitted += path_result.contours_emitted;
+        metrics.holes_emitted += path_result.holes_emitted;
+        metrics.points_emitted += path_result.points_emitted;
     }
 
     svg.push_str("</svg>\n");
-    svg
+    SvgBuildResult { svg, metrics }
 }
 
 /// Build SVG path data string from a list of contours.
-fn build_path_data(contours: &[Contour], config: &TracingConfig) -> String {
+fn build_path_data(contours: &[Contour], config: &TracingConfig) -> PathBuildResult {
     let mut parts = Vec::new();
+    let mut result = PathBuildResult::default();
 
     for contour in contours {
         if contour.len() < 3 {
@@ -90,9 +129,15 @@ fn build_path_data(contours: &[Contour], config: &TracingConfig) -> String {
         };
 
         parts.push(path);
+        result.contours_emitted += 1;
+        result.points_emitted += simplified.len();
+        if contour_is_hole(&simplified) {
+            result.holes_emitted += 1;
+        }
     }
 
-    parts.join(" ")
+    result.data = parts.join(" ");
+    result
 }
 
 /// Build a path using straight line segments.
@@ -194,5 +239,38 @@ mod tests {
 
         let svg = generate_svg(&regions, 4, 4, &config);
         assert!(svg.contains(r#"fill-rule="evenodd""#));
+    }
+
+    #[test]
+    fn generate_svg_with_metrics_counts_emitted_geometry() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.0,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![
+                vec![
+                    Point::new(0, 0),
+                    Point::new(4, 0),
+                    Point::new(4, 4),
+                    Point::new(0, 4),
+                ],
+                vec![
+                    Point::new(1, 1),
+                    Point::new(1, 3),
+                    Point::new(3, 3),
+                    Point::new(3, 1),
+                ],
+            ],
+        }];
+
+        let result = generate_svg_with_metrics(&regions, 4, 4, &config);
+        assert_eq!(result.metrics.regions_emitted, 1);
+        assert_eq!(result.metrics.contours_emitted, 2);
+        assert_eq!(result.metrics.holes_emitted, 1);
+        assert_eq!(result.metrics.points_emitted, 8);
     }
 }

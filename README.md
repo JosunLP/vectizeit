@@ -65,11 +65,11 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **69 automated tests** across three categories:
+The project includes **71 automated tests** across three categories:
 
 | Category | Location | Tests |
 |----------|----------|-------|
-| Unit tests | Embedded in each module (`#[cfg(test)]`) | 26 |
+| Unit tests | Embedded in each module (`#[cfg(test)]`) | 28 |
 | Integration tests | `crates/vectize/tests/integration_tests.rs` | 25 |
 | CLI smoke tests | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17 |
 | Doc tests | `crates/vectize/src/lib.rs` | 1 |
@@ -190,6 +190,14 @@ let tracer = Tracer::with_preset(QualityPreset::Balanced);
 let result = tracer.trace_file_result("input.png")?;
 
 println!("palette colors: {}", result.debug().palette().len());
+if let Some(metrics) = result.stage_metrics() {
+    println!(
+        "extracted={} after_despeckle={} emitted={}",
+        metrics.contours_extracted(),
+        metrics.contours_after_despeckle(),
+        metrics.contours_emitted()
+    );
+}
 for region in result.debug().regions() {
     println!(
         "region {} contours={} holes={} points={}",

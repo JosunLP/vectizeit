@@ -75,6 +75,101 @@ impl TraceDebugInfo {
     }
 }
 
+/// Structured stage metrics captured during a tracing run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceStageMetrics {
+    contours_extracted: usize,
+    holes_extracted: usize,
+    points_extracted: usize,
+    contours_after_despeckle: usize,
+    holes_after_despeckle: usize,
+    points_after_despeckle: usize,
+    contours_emitted: usize,
+    holes_emitted: usize,
+    points_emitted: usize,
+    regions_emitted: usize,
+}
+
+impl TraceStageMetrics {
+    /// Create a new stage metrics object.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        contours_extracted: usize,
+        holes_extracted: usize,
+        points_extracted: usize,
+        contours_after_despeckle: usize,
+        holes_after_despeckle: usize,
+        points_after_despeckle: usize,
+        contours_emitted: usize,
+        holes_emitted: usize,
+        points_emitted: usize,
+        regions_emitted: usize,
+    ) -> Self {
+        Self {
+            contours_extracted,
+            holes_extracted,
+            points_extracted,
+            contours_after_despeckle,
+            holes_after_despeckle,
+            points_after_despeckle,
+            contours_emitted,
+            holes_emitted,
+            points_emitted,
+            regions_emitted,
+        }
+    }
+
+    /// Return the contour count immediately after contour extraction.
+    pub fn contours_extracted(&self) -> usize {
+        self.contours_extracted
+    }
+
+    /// Return the hole contour count immediately after contour extraction.
+    pub fn holes_extracted(&self) -> usize {
+        self.holes_extracted
+    }
+
+    /// Return the traced point count immediately after contour extraction.
+    pub fn points_extracted(&self) -> usize {
+        self.points_extracted
+    }
+
+    /// Return the contour count after despeckling.
+    pub fn contours_after_despeckle(&self) -> usize {
+        self.contours_after_despeckle
+    }
+
+    /// Return the hole contour count after despeckling.
+    pub fn holes_after_despeckle(&self) -> usize {
+        self.holes_after_despeckle
+    }
+
+    /// Return the traced point count after despeckling.
+    pub fn points_after_despeckle(&self) -> usize {
+        self.points_after_despeckle
+    }
+
+    /// Return the contour count that survived SVG contour filtering.
+    pub fn contours_emitted(&self) -> usize {
+        self.contours_emitted
+    }
+
+    /// Return the hole contour count that survived SVG contour filtering.
+    pub fn holes_emitted(&self) -> usize {
+        self.holes_emitted
+    }
+
+    /// Return the total emitted point count after simplification.
+    pub fn points_emitted(&self) -> usize {
+        self.points_emitted
+    }
+
+    /// Return the number of `<path>` regions emitted into the SVG.
+    pub fn regions_emitted(&self) -> usize {
+        self.regions_emitted
+    }
+}
+
 /// Rich tracing result containing the SVG plus optional inspection data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TracingResult {
@@ -82,6 +177,7 @@ pub struct TracingResult {
     width: u32,
     height: u32,
     debug: TraceDebugInfo,
+    stage_metrics: Option<TraceStageMetrics>,
 }
 
 impl TracingResult {
@@ -92,6 +188,24 @@ impl TracingResult {
             width,
             height,
             debug,
+            stage_metrics: None,
+        }
+    }
+
+    /// Create a new tracing result with structured stage metrics.
+    pub fn with_stage_metrics(
+        svg: String,
+        width: u32,
+        height: u32,
+        debug: TraceDebugInfo,
+        stage_metrics: TraceStageMetrics,
+    ) -> Self {
+        Self {
+            svg,
+            width,
+            height,
+            debug,
+            stage_metrics: Some(stage_metrics),
         }
     }
 
@@ -118,6 +232,11 @@ impl TracingResult {
     /// Return debug-oriented tracing information.
     pub fn debug(&self) -> &TraceDebugInfo {
         &self.debug
+    }
+
+    /// Return structured metrics captured across tracing stages when available.
+    pub fn stage_metrics(&self) -> Option<&TraceStageMetrics> {
+        self.stage_metrics.as_ref()
     }
 
     /// Write the SVG to a file.

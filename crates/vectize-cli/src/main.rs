@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use vectize::{QualityPreset, Tracer, TracingConfig};
 
 /// trace: high-quality raster-to-vector image tracing tool
@@ -279,6 +279,7 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let tracer = Tracer::new(config);
     let result = tracer.trace_file_result(&args.input)?;
+    log_stage_metrics(&result);
 
     if args.stdout {
         print!("{}", result.svg());
@@ -369,6 +370,7 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
         info!("Tracing '{}'", path.display());
         match tracer.trace_file_result(&path) {
             Ok(result) => {
+                log_stage_metrics(&result);
                 if let Err(e) = result.write_svg(&output_path, args.overwrite) {
                     error!("Failed to write '{}': {e}", output_path.display());
                 } else {
@@ -384,6 +386,23 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Batch complete: {succeeded}/{total} files converted successfully.");
     Ok(())
+}
+
+fn log_stage_metrics(result: &vectize::TracingResult) {
+    let Some(metrics) = result.stage_metrics() else {
+        return;
+    };
+
+    debug!(
+        "Trace metrics: extracted_contours={} extracted_holes={} after_despeckle={} emitted_regions={} emitted_contours={} emitted_holes={} emitted_points={}",
+        metrics.contours_extracted(),
+        metrics.holes_extracted(),
+        metrics.contours_after_despeckle(),
+        metrics.regions_emitted(),
+        metrics.contours_emitted(),
+        metrics.holes_emitted(),
+        metrics.points_emitted()
+    );
 }
 
 impl OutputFormat {

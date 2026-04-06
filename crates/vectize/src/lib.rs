@@ -34,7 +34,7 @@ pub mod result;
 pub use config::{QualityPreset, TracingConfig};
 pub use error::{Result, VectizeError};
 pub use pipeline::segment::PaletteColor;
-pub use result::{TraceDebugInfo, TracedRegionSummary, TracingResult};
+pub use result::{TraceDebugInfo, TraceStageMetrics, TracedRegionSummary, TracingResult};
 
 use std::path::Path;
 
@@ -78,8 +78,8 @@ impl Tracer {
 
     /// Trace an image file and return a rich [`TracingResult`].
     ///
-    /// This variant preserves debug-oriented data such as the quantized palette
-    /// and contour summaries for downstream inspection or tuning.
+    /// This variant preserves debug-oriented data such as the quantized palette,
+    /// contour summaries, and stage metrics for downstream inspection or tuning.
     pub fn trace_file_result(&self, path: impl AsRef<Path>) -> Result<TracingResult> {
         let img = pipeline::loader::load_from_file(path.as_ref())?;
         pipeline::run_pipeline_with_debug(&img, &self.config)
@@ -154,6 +154,7 @@ mod tests {
         assert_eq!(result.width(), 2);
         assert_eq!(result.height(), 2);
         assert!(!result.debug().palette().is_empty());
+        assert!(result.stage_metrics().is_some());
     }
 
     #[test]
