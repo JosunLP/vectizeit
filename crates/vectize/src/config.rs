@@ -69,7 +69,7 @@ impl std::fmt::Display for QualityPreset {
 #[derive(Debug, Clone)]
 pub struct TracingConfig {
     /// Number of colors in the output palette (2–256).
-    pub color_count: u8,
+    pub color_count: u16,
     /// Polygon simplification tolerance in pixels (Ramer-Douglas-Peucker).
     pub simplification_tolerance: f64,
     /// Minimum region area in pixels; smaller regions are suppressed.
@@ -110,8 +110,8 @@ impl Default for TracingConfig {
 impl TracingConfig {
     /// Validate the configuration, returning an error message if invalid.
     pub fn validate(&self) -> Result<(), String> {
-        if self.color_count < 2 {
-            return Err("color_count must be at least 2".to_string());
+        if !(2..=256).contains(&self.color_count) {
+            return Err("color_count must be in the range 2..=256".to_string());
         }
         if self.simplification_tolerance < 0.0 {
             return Err("simplification_tolerance must be non-negative".to_string());

@@ -60,6 +60,8 @@ fn cli_convert_help() {
     assert!(stdout.contains("--preset"));
     assert!(stdout.contains("--output"));
     assert!(stdout.contains("--colors"));
+    assert!(stdout.contains("--corner-sensitivity"));
+    assert!(stdout.contains("--despeckle-threshold"));
     assert!(stdout.contains("--stdout"));
 }
 
@@ -70,6 +72,7 @@ fn cli_batch_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Input directory"));
     assert!(stdout.contains("Output directory"));
+    assert!(stdout.contains("--format"));
     assert!(stdout.contains("--preset"));
     assert!(stdout.contains("--overwrite"));
 }
@@ -178,10 +181,15 @@ fn cli_convert_with_options() {
             "0.5",
             "--smoothing",
             "0.3",
+            "--corner-sensitivity",
+            "0.7",
             "--min-area",
             "2.0",
             "--alpha-threshold",
             "100",
+            "--despeckle-threshold",
+            "1.5",
+            "--no-preprocess",
         ])
         .output()
         .unwrap();
@@ -367,8 +375,24 @@ fn cli_batch_converts_directory() {
             "batch",
             input_dir.to_str().unwrap(),
             output_dir.to_str().unwrap(),
+            "--format",
+            "svg",
             "--preset",
             "fast",
+            "--tolerance",
+            "0.8",
+            "--min-area",
+            "2.0",
+            "--smoothing",
+            "0.2",
+            "--corner-sensitivity",
+            "0.9",
+            "--alpha-threshold",
+            "100",
+            "--despeckle-threshold",
+            "1.0",
+            "--denoise",
+            "--no-preprocess",
         ])
         .output()
         .unwrap();

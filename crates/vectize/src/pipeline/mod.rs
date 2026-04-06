@@ -25,6 +25,7 @@ use log::debug;
 
 use crate::config::TracingConfig;
 use crate::error::Result;
+use crate::result::{TraceDebugInfo, TracedRegionSummary, TracingResult};
 
 use self::contour::Contour;
 use self::svg::ColorRegion;
@@ -33,6 +34,11 @@ use self::svg::ColorRegion;
 ///
 /// Returns the SVG as a `String`.
 pub fn run_pipeline(img: &DynamicImage, config: &TracingConfig) -> Result<String> {
+    Ok(run_pipeline_with_debug(img, config)?.into_svg())
+}
+
+/// Run the complete vectorization pipeline and keep debug-oriented stage data.
+pub fn run_pipeline_with_debug(img: &DynamicImage, config: &TracingConfig) -> Result<TracingResult> {
     debug!(
         "Pipeline: preprocessing image ({}×{})",
         img.width(),
@@ -74,9 +80,22 @@ pub fn run_pipeline(img: &DynamicImage, config: &TracingConfig) -> Result<String
     debug!("Pipeline: generating SVG ({} color regions)", regions.len());
 
     // Stage 7: SVG generation (includes simplification + curve fitting)
+    let debug = TraceDebugInfo::new(
+        segmentation.palette.clone(),
+        regions
+            .iter()
+            .map(|region| {
+                TracedRegionSummary::new(
+                    region.color,
+                    region.contours.len(),
+                    region.contours.iter().map(std::vec::Vec::len).sum(),
+                )
+            })
+            .collect(),
+    );
     let svg = svg::generate_svg(&regions, width, height, config);
 
-    Ok(svg)
+    Ok(TracingResult::new(svg, width, height, debug))
 }
 
 /// Remove contours whose perimeter is below the despeckle threshold.

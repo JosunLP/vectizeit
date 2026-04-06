@@ -18,21 +18,23 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use vectize::{Tracer, TracingConfig, QualityPreset};
+//! use vectize::{QualityPreset, Tracer};
 //!
 //! // Use a quality preset
-//! let config = QualityPreset::High.to_config();
-//! let tracer = Tracer::new(config);
-//! let svg = tracer.trace_file("input.png").unwrap();
-//! std::fs::write("output.svg", svg).unwrap();
+//! let tracer = Tracer::with_preset(QualityPreset::High);
+//! let result = tracer.trace_file_result("input.png").unwrap();
+//! result.write_svg("output.svg", true).unwrap();
 //! ```
 
 pub mod config;
 pub mod error;
 pub mod pipeline;
+pub mod result;
 
 pub use config::{QualityPreset, TracingConfig};
 pub use error::{Result, VectizeError};
+pub use pipeline::segment::PaletteColor;
+pub use result::{TraceDebugInfo, TracedRegionSummary, TracingResult};
 
 use std::path::Path;
 
@@ -61,8 +63,7 @@ impl Tracer {
     /// # Errors
     /// Returns an error if the file cannot be read, decoded, or traced.
     pub fn trace_file(&self, path: impl AsRef<Path>) -> Result<String> {
-        let img = pipeline::loader::load_from_file(path.as_ref())?;
-        pipeline::run_pipeline(&img, &self.config)
+        Ok(self.trace_file_result(path)?.into_svg())
     }
 
     /// Trace an image from raw bytes and return the SVG as a string.
@@ -72,8 +73,22 @@ impl Tracer {
     /// # Errors
     /// Returns an error if the bytes cannot be decoded or traced.
     pub fn trace_bytes(&self, bytes: &[u8]) -> Result<String> {
+        Ok(self.trace_bytes_result(bytes)?.into_svg())
+    }
+
+    /// Trace an image file and return a rich [`TracingResult`].
+    ///
+    /// This variant preserves debug-oriented data such as the quantized palette
+    /// and contour summaries for downstream inspection or tuning.
+    pub fn trace_file_result(&self, path: impl AsRef<Path>) -> Result<TracingResult> {
+        let img = pipeline::loader::load_from_file(path.as_ref())?;
+        pipeline::run_pipeline_with_debug(&img, &self.config)
+    }
+
+    /// Trace an image from raw bytes and return a rich [`TracingResult`].
+    pub fn trace_bytes_result(&self, bytes: &[u8]) -> Result<TracingResult> {
         let img = pipeline::loader::load_from_bytes(bytes)?;
-        pipeline::run_pipeline(&img, &self.config)
+        pipeline::run_pipeline_with_debug(&img, &self.config)
     }
 
     /// Return a reference to the current configuration.
@@ -124,6 +139,21 @@ mod tests {
         let mut config = TracingConfig::default();
         config.color_count = 1;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn trace_bytes_result_exposes_debug_info() {
+        let tracer = Tracer::with_preset(QualityPreset::Balanced);
+        let png = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(png)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+
+        let result = tracer.trace_bytes_result(&buf.into_inner()).unwrap();
+        assert_eq!(result.width(), 2);
+        assert_eq!(result.height(), 2);
+        assert!(!result.debug().palette().is_empty());
     }
 
     #[test]

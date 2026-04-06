@@ -143,6 +143,38 @@ fn trace_bytes_custom_config() {
 }
 
 #[test]
+fn trace_bytes_result_exposes_debug_data() {
+    let img = make_solid_image(12, 10, Rgba([20, 40, 60, 255]));
+    let bytes = encode_png(&img);
+
+    let tracer = Tracer::with_preset(QualityPreset::Balanced);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+
+    assert_eq!(result.width(), 12);
+    assert_eq!(result.height(), 10);
+    assert!(result.svg().contains("<svg"));
+    assert!(!result.debug().palette().is_empty());
+    assert!(!result.debug().regions().is_empty());
+}
+
+#[test]
+fn tracing_result_can_write_svg() {
+    let img = make_solid_image(6, 6, Rgba([80, 90, 100, 255]));
+    let bytes = encode_png(&img);
+    let output_path = std::env::temp_dir().join("vectize_test_tracing_result.svg");
+    let _ = std::fs::remove_file(&output_path);
+
+    let tracer = Tracer::with_preset(QualityPreset::Balanced);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+    result.write_svg(&output_path, false).unwrap();
+
+    let written = std::fs::read_to_string(&output_path).unwrap();
+    assert!(written.contains("<svg"));
+
+    let _ = std::fs::remove_file(&output_path);
+}
+
+#[test]
 fn trace_bytes_invalid_data_returns_error() {
     let tracer = Tracer::with_preset(QualityPreset::Balanced);
     let result = tracer.trace_bytes(b"not an image");
@@ -215,6 +247,12 @@ fn config_validation_comprehensive() {
     assert!(cfg.validate().is_err());
 
     cfg.color_count = 1;
+    assert!(cfg.validate().is_err());
+
+    cfg.color_count = 256;
+    assert!(cfg.validate().is_ok());
+
+    cfg.color_count = 257;
     assert!(cfg.validate().is_err());
 
     // Invalid: negative tolerance
@@ -380,7 +418,7 @@ fn large_color_count() {
     let bytes = encode_png(&img);
 
     let mut config = TracingConfig::default();
-    config.color_count = 255; // Maximum
+    config.color_count = 256; // Maximum
     let tracer = Tracer::new(config);
     let svg = tracer.trace_bytes(&bytes).unwrap();
     assert!(svg.contains("<svg"));
