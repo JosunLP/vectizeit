@@ -27,6 +27,73 @@ fn encode_jpeg(img: &RgbaImage) -> Vec<u8> {
     buf.into_inner()
 }
 
+fn extract_path_numbers(svg: &str) -> Vec<f64> {
+    let mut values = Vec::new();
+    let mut search_offset = 0;
+
+    while let Some(relative_start) = svg[search_offset..].find(" d=\"") {
+        let data_start = search_offset + relative_start + 4;
+        let Some(relative_end) = svg[data_start..].find('"') else {
+            break;
+        };
+
+        values.extend(parse_svg_numbers(
+            &svg[data_start..data_start + relative_end],
+        ));
+        search_offset = data_start + relative_end + 1;
+    }
+
+    values
+}
+
+fn extract_path_number_tokens(svg: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut search_offset = 0;
+
+    while let Some(relative_start) = svg[search_offset..].find(" d=\"") {
+        let data_start = search_offset + relative_start + 4;
+        let Some(relative_end) = svg[data_start..].find('"') else {
+            break;
+        };
+
+        values.extend(parse_svg_number_tokens(
+            &svg[data_start..data_start + relative_end],
+        ));
+        search_offset = data_start + relative_end + 1;
+    }
+
+    values
+}
+
+fn parse_svg_numbers(data: &str) -> Vec<f64> {
+    parse_svg_number_tokens(data)
+        .into_iter()
+        .filter_map(|token| token.parse::<f64>().ok())
+        .collect()
+}
+
+fn parse_svg_number_tokens(data: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+
+    for ch in data.chars() {
+        if ch.is_ascii_digit() || ch == '.' || ch == '-' {
+            current.push(ch);
+            continue;
+        }
+
+        if !current.is_empty() {
+            values.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        values.push(current);
+    }
+
+    values
+}
+
 // ---------------------------------------------------------------------------
 // API Integration Tests
 // ---------------------------------------------------------------------------
@@ -77,6 +144,212 @@ fn trace_bytes_two_color_image() {
     assert!(
         path_count >= 2,
         "Expected at least 2 path elements, got {path_count}"
+    );
+}
+
+#[test]
+fn trace_bytes_emits_smaller_detail_after_larger_background() {
+    let img = ImageBuffer::from_fn(12, 12, |x, y| {
+        if (4..=7).contains(&x) && (4..=7).contains(&y) {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 0, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 8,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
+    let background_index = svg.find("fill=\"#000000\"").unwrap();
+    let detail_index = svg.find("fill=\"#ff0000\"").unwrap();
+
+    assert!(background_index < detail_index);
+}
+
+#[test]
+fn trace_bytes_omits_border_connected_white_path() {
+    let img = ImageBuffer::from_fn(12, 12, |x, y| {
+        if (3..=8).contains(&x) && (3..=8).contains(&y) {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 8,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
+
+    assert!(svg.contains("fill=\"white\""));
+    assert!(svg.contains("fill=\"#000000\""));
+    assert!(!svg.contains("fill=\"#ffffff\""));
+    assert_eq!(svg.matches("<path").count(), 1);
+}
+
+#[test]
+fn trace_bytes_keeps_interior_white_island_when_background_is_white() {
+    let img = ImageBuffer::from_fn(13, 13, |x, y| {
+        if (2..=10).contains(&x)
+            && (2..=10).contains(&y)
+            && !((5..=7).contains(&x) && (5..=7).contains(&y))
+        {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+
+    assert!(result.svg().contains("fill=\"#ffffff\""));
+    assert!(result.svg().contains("M 5.00 5.00"));
+    assert_eq!(result.svg().matches("<path").count(), 2);
+    assert_eq!(metrics.regions_emitted(), 2);
+    assert_eq!(metrics.invalid_contours_discarded(), 0);
+    assert_eq!(metrics.contours_simplified_away(), 0);
+    assert_eq!(metrics.contours_filtered_min_area(), 0);
+    assert_eq!(metrics.contours_suppressed_background(), 1);
+}
+
+#[test]
+fn trace_bytes_stage_metrics_report_svg_filtered_contours() {
+    let img = ImageBuffer::from_fn(12, 12, |x, y| {
+        if (5..=6).contains(&x) && (5..=6).contains(&y) {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 10.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+
+    assert_eq!(result.svg().matches("<path").count(), 0);
+    assert_eq!(metrics.invalid_contours_discarded(), 0);
+    assert_eq!(metrics.contours_simplified_away(), 0);
+    assert_eq!(metrics.contours_filtered_min_area(), 1);
+    assert_eq!(metrics.contours_suppressed_background(), 1);
+    assert_eq!(metrics.contours_emitted(), 0);
+    assert_eq!(metrics.regions_emitted(), 0);
+}
+
+#[test]
+fn trace_bytes_uses_two_decimal_coordinate_precision() {
+    let img = make_solid_image(1, 1, Rgba([0, 0, 0, 255]));
+    let bytes = encode_png(&img);
+
+    for smoothing_strength in [0.0, 0.6] {
+        let config = TracingConfig {
+            color_count: 2,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            smoothing_strength,
+            corner_sensitivity: 0.6,
+            alpha_threshold: 128,
+            despeckle_threshold: 0.0,
+            enable_denoising: false,
+            enable_preprocessing: true,
+            quality_preset: QualityPreset::Balanced,
+        };
+
+        let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
+        let path_tokens = extract_path_number_tokens(&svg);
+
+        assert!(!path_tokens.is_empty());
+        assert!(
+            path_tokens.iter().all(|token| token
+                .split_once('.')
+                .is_some_and(|(_, fraction)| fraction.len() == 2)),
+            "all path coordinates must use two decimal places for smoothing_strength={smoothing_strength}: {path_tokens:?}"
+        );
+    }
+}
+
+#[test]
+fn trace_bytes_smoothing_keeps_edge_touching_coordinates_inside_viewbox() {
+    let img = make_solid_image(20, 20, Rgba([0, 0, 0, 255]));
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.8,
+        corner_sensitivity: 0.0,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
+    let path_numbers = extract_path_numbers(result.svg());
+
+    assert!(result.svg().contains(" C "));
+    assert!(!path_numbers.is_empty());
+    assert!(
+        path_numbers
+            .iter()
+            .all(|value| (0.0..=20.0).contains(value)),
+        "edge-touching smoothed coordinates must stay inside the viewBox, got {path_numbers:?}"
     );
 }
 
@@ -161,6 +434,10 @@ fn trace_bytes_result_exposes_debug_data() {
     assert!(
         result.debug().regions()[0].hole_count() <= result.debug().regions()[0].contour_count()
     );
+    assert_eq!(metrics.invalid_contours_discarded(), 0);
+    assert_eq!(metrics.contours_simplified_away(), 0);
+    assert_eq!(metrics.contours_filtered_min_area(), 0);
+    assert_eq!(metrics.contours_suppressed_background(), 0);
     assert!(metrics.contours_extracted() >= metrics.contours_after_despeckle());
     assert!(metrics.contours_after_despeckle() >= metrics.contours_emitted());
 }
@@ -206,6 +483,10 @@ fn trace_bytes_ring_image_preserves_hole() {
 
     assert_eq!(black_region.contour_count(), 2);
     assert_eq!(black_region.hole_count(), 1);
+    assert_eq!(metrics.invalid_contours_discarded(), 0);
+    assert_eq!(metrics.contours_simplified_away(), 0);
+    assert_eq!(metrics.contours_filtered_min_area(), 0);
+    assert_eq!(metrics.contours_suppressed_background(), 1);
     assert!(metrics.contours_extracted() >= 2);
     assert!(metrics.holes_extracted() >= 1);
     assert!(metrics.holes_after_despeckle() >= 1);
@@ -275,10 +556,20 @@ fn trace_bytes_result_uses_closed_beziers_for_closed_contours() {
     let metrics = result
         .stage_metrics()
         .expect("stage metrics should be present");
+    let path_numbers = extract_path_numbers(result.svg());
 
     assert_eq!(result.svg().matches(" C ").count(), 4);
     assert_eq!(metrics.contours_emitted(), 1);
     assert_eq!(metrics.points_emitted(), 13);
+    assert_eq!(metrics.invalid_contours_discarded(), 0);
+    assert_eq!(metrics.contours_simplified_away(), 0);
+    assert_eq!(metrics.contours_filtered_min_area(), 0);
+    assert_eq!(metrics.contours_suppressed_background(), 0);
+    assert!(!path_numbers.is_empty());
+    assert!(
+        path_numbers.iter().all(|value| (0.0..=1.0).contains(value)),
+        "smoothed coordinates must stay inside the viewBox, got {path_numbers:?}"
+    );
 }
 
 #[test]

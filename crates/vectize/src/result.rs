@@ -81,9 +81,13 @@ pub struct TraceStageMetrics {
     contours_extracted: usize,
     holes_extracted: usize,
     points_extracted: usize,
+    invalid_contours_discarded: usize,
     contours_after_despeckle: usize,
     holes_after_despeckle: usize,
     points_after_despeckle: usize,
+    contours_simplified_away: usize,
+    contours_filtered_min_area: usize,
+    contours_suppressed_background: usize,
     contours_emitted: usize,
     holes_emitted: usize,
     points_emitted: usize,
@@ -105,13 +109,121 @@ impl TraceStageMetrics {
         points_emitted: usize,
         regions_emitted: usize,
     ) -> Self {
+        Self::from_parts(
+            contours_extracted,
+            holes_extracted,
+            points_extracted,
+            0,
+            contours_after_despeckle,
+            holes_after_despeckle,
+            points_after_despeckle,
+            0,
+            0,
+            0,
+            contours_emitted,
+            holes_emitted,
+            points_emitted,
+            regions_emitted,
+        )
+    }
+
+    /// Create a new stage metrics object with contour extraction diagnostics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_invalid_contours_discarded(
+        contours_extracted: usize,
+        holes_extracted: usize,
+        points_extracted: usize,
+        invalid_contours_discarded: usize,
+        contours_after_despeckle: usize,
+        holes_after_despeckle: usize,
+        points_after_despeckle: usize,
+        contours_emitted: usize,
+        holes_emitted: usize,
+        points_emitted: usize,
+        regions_emitted: usize,
+    ) -> Self {
+        Self::from_parts(
+            contours_extracted,
+            holes_extracted,
+            points_extracted,
+            invalid_contours_discarded,
+            contours_after_despeckle,
+            holes_after_despeckle,
+            points_after_despeckle,
+            0,
+            0,
+            0,
+            contours_emitted,
+            holes_emitted,
+            points_emitted,
+            regions_emitted,
+        )
+    }
+
+    /// Create a new stage metrics object with contour extraction and SVG filtering diagnostics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_svg_diagnostics(
+        contours_extracted: usize,
+        holes_extracted: usize,
+        points_extracted: usize,
+        invalid_contours_discarded: usize,
+        contours_after_despeckle: usize,
+        holes_after_despeckle: usize,
+        points_after_despeckle: usize,
+        contours_simplified_away: usize,
+        contours_filtered_min_area: usize,
+        contours_suppressed_background: usize,
+        contours_emitted: usize,
+        holes_emitted: usize,
+        points_emitted: usize,
+        regions_emitted: usize,
+    ) -> Self {
+        Self::from_parts(
+            contours_extracted,
+            holes_extracted,
+            points_extracted,
+            invalid_contours_discarded,
+            contours_after_despeckle,
+            holes_after_despeckle,
+            points_after_despeckle,
+            contours_simplified_away,
+            contours_filtered_min_area,
+            contours_suppressed_background,
+            contours_emitted,
+            holes_emitted,
+            points_emitted,
+            regions_emitted,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        contours_extracted: usize,
+        holes_extracted: usize,
+        points_extracted: usize,
+        invalid_contours_discarded: usize,
+        contours_after_despeckle: usize,
+        holes_after_despeckle: usize,
+        points_after_despeckle: usize,
+        contours_simplified_away: usize,
+        contours_filtered_min_area: usize,
+        contours_suppressed_background: usize,
+        contours_emitted: usize,
+        holes_emitted: usize,
+        points_emitted: usize,
+        regions_emitted: usize,
+    ) -> Self {
         Self {
             contours_extracted,
             holes_extracted,
             points_extracted,
+            invalid_contours_discarded,
             contours_after_despeckle,
             holes_after_despeckle,
             points_after_despeckle,
+            contours_simplified_away,
+            contours_filtered_min_area,
+            contours_suppressed_background,
             contours_emitted,
             holes_emitted,
             points_emitted,
@@ -134,6 +246,11 @@ impl TraceStageMetrics {
         self.points_extracted
     }
 
+    /// Return the number of invalid contour loops discarded during contour extraction.
+    pub fn invalid_contours_discarded(&self) -> usize {
+        self.invalid_contours_discarded
+    }
+
     /// Return the contour count after despeckling.
     pub fn contours_after_despeckle(&self) -> usize {
         self.contours_after_despeckle
@@ -147,6 +264,21 @@ impl TraceStageMetrics {
     /// Return the traced point count after despeckling.
     pub fn points_after_despeckle(&self) -> usize {
         self.points_after_despeckle
+    }
+
+    /// Return the number of contours that collapsed below three vertices after SVG simplification.
+    pub fn contours_simplified_away(&self) -> usize {
+        self.contours_simplified_away
+    }
+
+    /// Return the number of contours filtered out by `min_region_area` during SVG generation.
+    pub fn contours_filtered_min_area(&self) -> usize {
+        self.contours_filtered_min_area
+    }
+
+    /// Return the number of redundant border-connected background contours suppressed during SVG generation.
+    pub fn contours_suppressed_background(&self) -> usize {
+        self.contours_suppressed_background
     }
 
     /// Return the contour count that survived SVG contour filtering.

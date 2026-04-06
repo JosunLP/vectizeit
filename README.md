@@ -30,7 +30,7 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (27 tests)
+│   │       └── integration_tests.rs  # API & golden tests (33 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
@@ -65,12 +65,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **76 automated tests** across four categories:
+The project includes **98 automated tests** across four categories:
 
 | Category          | Location                                      | Tests |
 | ----------------- | --------------------------------------------- | ----- |
-| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 31    |
-| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 27    |
+| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 47    |
+| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 33    |
 | CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17    |
 | Doc tests         | `crates/vectize/src/lib.rs`                   | 1     |
 
@@ -193,9 +193,13 @@ let result = tracer.trace_file_result("input.png")?;
 println!("palette colors: {}", result.debug().palette().len());
 if let Some(metrics) = result.stage_metrics() {
     println!(
-        "extracted={} after_despeckle={} emitted={}",
+    "extracted={} invalid={} after_despeckle={} simplified_away={} filtered_area={} suppressed_background={} emitted={}",
         metrics.contours_extracted(),
+      metrics.invalid_contours_discarded(),
         metrics.contours_after_despeckle(),
+      metrics.contours_simplified_away(),
+      metrics.contours_filtered_min_area(),
+      metrics.contours_suppressed_background(),
         metrics.contours_emitted()
     );
 }
@@ -236,15 +240,29 @@ if let Err(msg) = config.validate() {
 
 The library processes images in seven sequential stages:
 
-| Stage           | Module                              | Description                                                                                                                                                                                                                                          |
-| --------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Load         | `pipeline::loader`                  | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header.                                                                                                                                  |
-| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background.                                                     |
-| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space.                                                                                                      |
-| 4. Contour      | `pipeline::contour`                 | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding.                                                                                                                                     |
-| 5. Despeckle    | `pipeline::mod`                     | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles.                                                                                                                                    |
-| 6. Simplify     | `pipeline::simplify`                | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness.                                                                                                           |
-| 7. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth closed contours into **cubic Bezier splines** using Catmull-Rom tangents with **wrap-around corner detection** (`corner_sensitivity`), then emit valid SVG markup with proper `viewBox`, `<path>` elements, and a white background rectangle. |
+| Stage           | Module                              | Description                                                                                                                                                                                                                                           |
+| --------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Load         | `pipeline::loader`                  | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header.                                                                                                                                   |
+| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background.                                                      |
+| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space.                                                                                                       |
+| 4. Contour      | `pipeline::contour`                 | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. Incomplete or otherwise invalid loops are discarded before downstream processing and reported through stage metrics for diagnostics. |
+| 5. Despeckle    | `pipeline::mod`                     | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles.                                                                                                                                     |
+| 6. Simplify     | `pipeline::simplify`                | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness.                                                                                                            |
+| 7. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth closed contours into **cubic Bezier splines** using wrap-around corner detection and edge-aligned handles, then emit valid SVG markup with deterministic area-based path ordering so smaller details stay above larger fills.                  |
+
+Border-connected pure-white background contours are omitted from final `<path>` elements
+because the document already includes a white background rectangle. Interior white islands
+are still emitted normally, including islands that share the same white palette entry as
+the suppressed border-connected background.
+
+All SVG path coordinates are serialized with fixed two-decimal precision so linear and
+Bezier output use the same deterministic coordinate format.
+
+Bezier control points are clamped to the canvas bounds so edge-touching smoothed paths
+stay inside the final SVG viewBox.
+
+Structured stage metrics also report contours simplified away during SVG preparation,
+contours filtered by `min_region_area`, and contours suppressed as redundant background.
 
 ---
 

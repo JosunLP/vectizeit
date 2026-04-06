@@ -6,6 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use log::debug;
+
 use super::segment::SegmentationResult;
 
 /// A 2D integer point.
@@ -23,6 +25,12 @@ impl Point {
 
 /// A contour: a closed sequence of points.
 pub type Contour = Vec<Point>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ContourExtractionResult {
+    pub contour_groups: Vec<(u8, Vec<Contour>)>,
+    pub invalid_contours_discarded: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct Edge {
@@ -53,15 +61,28 @@ impl Direction {
 ///
 /// Returns a list of `(palette_index, contours)` pairs.
 pub fn extract_contours(seg: &SegmentationResult) -> Vec<(u8, Vec<Contour>)> {
+    extract_contours_with_stats(seg).contour_groups
+}
+
+pub(crate) fn extract_contours_with_stats(seg: &SegmentationResult) -> ContourExtractionResult {
     let width = seg.width as usize;
     let height = seg.height as usize;
 
-    let mut result = Vec::new();
+    let mut result = ContourExtractionResult::default();
     for color_idx in 0..seg.palette.len() as u8 {
-        let contours = trace_color_contours(&seg.labels, width, height, color_idx);
-        if !contours.is_empty() {
-            result.push((color_idx, contours));
+        let traced = trace_color_contours(&seg.labels, width, height, color_idx);
+        result.invalid_contours_discarded += traced.invalid_contours_discarded;
+
+        if !traced.contours.is_empty() {
+            result.contour_groups.push((color_idx, traced.contours));
         }
+    }
+
+    if result.invalid_contours_discarded > 0 {
+        debug!(
+            "Contour extraction discarded {} invalid contour loops",
+            result.invalid_contours_discarded
+        );
     }
 
     result
@@ -90,10 +111,22 @@ pub fn signed_area(contour: &Contour) -> f64 {
 
 /// Trace all contours for a single color label by extracting exposed pixel edges
 /// and stitching them into loops.
-fn trace_color_contours(labels: &[u8], width: usize, height: usize, target: u8) -> Vec<Contour> {
+fn trace_color_contours(labels: &[u8], width: usize, height: usize, target: u8) -> LoopTraceResult {
     let mask: Vec<bool> = labels.iter().map(|&label| label == target).collect();
     let edges = collect_boundary_edges(&mask, width, height);
     trace_loops(edges)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LoopTraceResult {
+    contours: Vec<Contour>,
+    invalid_contours_discarded: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TracedLoop {
+    contour: Contour,
+    closed: bool,
 }
 
 fn collect_boundary_edges(mask: &[bool], width: usize, height: usize) -> Vec<Edge> {
@@ -139,7 +172,7 @@ fn collect_boundary_edges(mask: &[bool], width: usize, height: usize) -> Vec<Edg
     edges
 }
 
-fn trace_loops(edges: Vec<Edge>) -> Vec<Contour> {
+fn trace_loops(edges: Vec<Edge>) -> LoopTraceResult {
     let mut outgoing: HashMap<Point, Vec<Point>> = HashMap::new();
     for edge in &edges {
         outgoing.entry(edge.start).or_default().push(edge.end);
@@ -149,40 +182,45 @@ fn trace_loops(edges: Vec<Edge>) -> Vec<Contour> {
     }
 
     let mut unused: HashSet<Edge> = edges.iter().copied().collect();
-    let mut contours = Vec::new();
+    let mut result = LoopTraceResult::default();
 
     for edge in edges {
         if !unused.contains(&edge) {
             continue;
         }
 
-        let contour = trace_loop(edge, &outgoing, &mut unused);
-        if contour.len() >= 3 {
-            contours.push(contour);
+        let traced_loop = trace_loop(edge, &outgoing, &mut unused);
+        if traced_loop.closed && traced_loop.contour.len() >= 3 {
+            result.contours.push(traced_loop.contour);
+        } else {
+            result.invalid_contours_discarded += 1;
         }
     }
 
-    contours.sort_by(|left, right| {
+    result.contours.sort_by(|left, right| {
         contour_sort_key(left)
             .cmp(&contour_sort_key(right))
             .then_with(|| left.len().cmp(&right.len()))
     });
-    contours
+
+    result
 }
 
 fn trace_loop(
     start_edge: Edge,
     outgoing: &HashMap<Point, Vec<Point>>,
     unused: &mut HashSet<Edge>,
-) -> Contour {
+) -> TracedLoop {
     let mut contour = vec![start_edge.start];
     let mut current_edge = start_edge;
+    let mut closed = false;
 
     loop {
         unused.remove(&current_edge);
 
         let current_point = current_edge.end;
         if current_point == start_edge.start {
+            closed = true;
             break;
         }
 
@@ -198,7 +236,7 @@ fn trace_loop(
         };
     }
 
-    contour
+    TracedLoop { contour, closed }
 }
 
 fn choose_next_point(
@@ -344,5 +382,56 @@ mod tests {
 
         let contours = extract_contours(&seg);
         assert_eq!(contours[0].1.len(), 2);
+    }
+
+    #[test]
+    fn trace_loops_discards_incomplete_contours() {
+        let result = trace_loops(vec![
+            Edge {
+                start: Point::new(0, 0),
+                end: Point::new(1, 0),
+            },
+            Edge {
+                start: Point::new(1, 0),
+                end: Point::new(1, 1),
+            },
+        ]);
+
+        assert!(result.contours.is_empty());
+        assert_eq!(result.invalid_contours_discarded, 1);
+    }
+
+    #[test]
+    fn trace_loops_keeps_valid_loops_while_counting_invalid_ones() {
+        let result = trace_loops(vec![
+            Edge {
+                start: Point::new(0, 0),
+                end: Point::new(1, 0),
+            },
+            Edge {
+                start: Point::new(1, 0),
+                end: Point::new(2, 0),
+            },
+            Edge {
+                start: Point::new(10, 10),
+                end: Point::new(11, 10),
+            },
+            Edge {
+                start: Point::new(11, 10),
+                end: Point::new(11, 11),
+            },
+            Edge {
+                start: Point::new(11, 11),
+                end: Point::new(10, 11),
+            },
+            Edge {
+                start: Point::new(10, 11),
+                end: Point::new(10, 10),
+            },
+        ]);
+
+        assert_eq!(result.contours.len(), 1);
+        assert_eq!(result.invalid_contours_discarded, 1);
+        assert!(signed_area(&result.contours[0]) > 0.0);
     }
 }

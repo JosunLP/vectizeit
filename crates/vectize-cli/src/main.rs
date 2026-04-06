@@ -393,11 +393,23 @@ fn log_stage_metrics(result: &vectize::TracingResult) {
         return;
     };
 
+    if metrics.invalid_contours_discarded() > 0 {
+        warn!(
+            "Dropped {} invalid contours during extraction; the output may omit malformed regions.",
+            metrics.invalid_contours_discarded()
+        );
+    }
+
     debug!(
-        "Trace metrics: extracted_contours={} extracted_holes={} after_despeckle={} emitted_regions={} emitted_contours={} emitted_holes={} emitted_points={}",
+        "Trace metrics: extracted_contours={} extracted_holes={} extracted_points={} invalid_contours_discarded={} after_despeckle={} svg_simplified_away={} svg_filtered_min_area={} svg_suppressed_background={} emitted_regions={} emitted_contours={} emitted_holes={} emitted_points={}",
         metrics.contours_extracted(),
         metrics.holes_extracted(),
+        metrics.points_extracted(),
+        metrics.invalid_contours_discarded(),
         metrics.contours_after_despeckle(),
+        metrics.contours_simplified_away(),
+        metrics.contours_filtered_min_area(),
+        metrics.contours_suppressed_background(),
         metrics.regions_emitted(),
         metrics.contours_emitted(),
         metrics.holes_emitted(),

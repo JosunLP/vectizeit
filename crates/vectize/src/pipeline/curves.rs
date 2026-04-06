@@ -2,7 +2,8 @@
 //!
 //! Converts simplified polylines into smooth cubic Bezier splines
 //! for cleaner SVG output. Supports corner detection to preserve
-//! sharp angles while smoothing gentle curves.
+//! sharp angles while smoothing gentle curves and keeping corner
+//! handles aligned with traced edges.
 
 use crate::pipeline::contour::Point;
 
@@ -78,14 +79,10 @@ fn fit_cubic_beziers_impl(
         let next_idx = if closed { (i + 1) % n } else { i + 1 };
         let p3 = pts[next_idx];
 
-        // If either endpoint is a detected corner, reduce smoothing
-        let local_tension = if corners[i] || corners[next_idx] {
-            tension * 0.15 // nearly straight at corners
-        } else {
-            tension
-        };
+        let start_tension = endpoint_tension(tension, corners[i]);
+        let end_tension = endpoint_tension(tension, corners[next_idx]);
 
-        // Catmull-Rom tangent vectors
+        // Catmull-Rom tangent vectors with edge-aligned handles at detected corners.
         let prev = if closed {
             pts[(i + n - 1) % n]
         } else if i > 0 {
@@ -101,19 +98,55 @@ fn fit_cubic_beziers_impl(
             p3
         };
 
-        let p1 = (
-            p0.0 + local_tension * (p3.0 - prev.0),
-            p0.1 + local_tension * (p3.1 - prev.1),
-        );
-        let p2 = (
-            p3.0 - local_tension * (next.0 - p0.0),
-            p3.1 - local_tension * (next.1 - p0.1),
-        );
+        let p1 = start_control_point(prev, p0, p3, start_tension, corners[i]);
+        let p2 = end_control_point(p0, p3, next, end_tension, corners[next_idx]);
 
         segments.push(CubicBezier { p0, p1, p2, p3 });
     }
 
     segments
+}
+
+fn endpoint_tension(base_tension: f64, preserve_corner: bool) -> f64 {
+    if preserve_corner {
+        base_tension * 0.25
+    } else {
+        base_tension
+    }
+}
+
+fn start_control_point(
+    previous: (f64, f64),
+    start: (f64, f64),
+    end: (f64, f64),
+    tension: f64,
+    preserve_corner: bool,
+) -> (f64, f64) {
+    if preserve_corner {
+        lerp2(start, end, tension)
+    } else {
+        (
+            start.0 + tension * (end.0 - previous.0),
+            start.1 + tension * (end.1 - previous.1),
+        )
+    }
+}
+
+fn end_control_point(
+    start: (f64, f64),
+    end: (f64, f64),
+    next: (f64, f64),
+    tension: f64,
+    preserve_corner: bool,
+) -> (f64, f64) {
+    if preserve_corner {
+        lerp2(end, start, tension)
+    } else {
+        (
+            end.0 - tension * (next.0 - start.0),
+            end.1 - tension * (next.1 - start.1),
+        )
+    }
 }
 
 fn detect_closed_corners(pts: &[(f64, f64)], sensitivity: f64) -> Vec<bool> {
@@ -250,5 +283,38 @@ mod tests {
         let corners = detect_closed_corners(&pts, 0.6);
 
         assert!(corners.iter().all(|&corner| corner));
+    }
+
+    #[test]
+    fn closed_square_corner_handles_stay_within_edges() {
+        let pts = vec![
+            Point::new(0, 0),
+            Point::new(10, 0),
+            Point::new(10, 10),
+            Point::new(0, 10),
+        ];
+
+        let beziers = fit_closed_cubic_beziers(&pts, 0.6, 0.6);
+
+        for bezier in &beziers {
+            for (x, y) in [bezier.p0, bezier.p1, bezier.p2, bezier.p3] {
+                assert!(
+                    (0.0..=10.0).contains(&x),
+                    "x coordinate must stay in bounds: {x}"
+                );
+                assert!(
+                    (0.0..=10.0).contains(&y),
+                    "y coordinate must stay in bounds: {y}"
+                );
+            }
+        }
+
+        let top = &beziers[0];
+        assert!(top.p1.1.abs() < 1e-12);
+        assert!(top.p2.1.abs() < 1e-12);
+
+        let right = &beziers[1];
+        assert!((right.p1.0 - 10.0).abs() < 1e-12);
+        assert!((right.p2.0 - 10.0).abs() < 1e-12);
     }
 }

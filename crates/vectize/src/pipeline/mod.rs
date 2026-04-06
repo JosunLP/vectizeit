@@ -63,11 +63,14 @@ pub fn run_pipeline_with_debug(
 
     // Stage 4: Contour extraction
     debug!("Pipeline: extracting contours");
-    let contour_groups = contour::extract_contours(&segmentation);
-    let extracted_metrics = summarize_contours(&contour_groups);
+    let contour_extraction = contour::extract_contours_with_stats(&segmentation);
+    let extracted_metrics = summarize_contours(&contour_extraction.contour_groups);
 
     // Stage 5: Despeckle – remove tiny contours below perimeter threshold
-    let contour_groups = despeckle(contour_groups, config.despeckle_threshold);
+    let contour_groups = despeckle(
+        contour_extraction.contour_groups,
+        config.despeckle_threshold,
+    );
     let despeckled_metrics = summarize_contours(&contour_groups);
 
     // Stage 6: Build color regions for SVG generation
@@ -104,13 +107,17 @@ pub fn run_pipeline_with_debug(
             .collect(),
     );
     let svg_result = generate_svg_with_metrics(&regions, width, height, config);
-    let stage_metrics = TraceStageMetrics::new(
+    let stage_metrics = TraceStageMetrics::with_svg_diagnostics(
         extracted_metrics.contours,
         extracted_metrics.holes,
         extracted_metrics.points,
+        contour_extraction.invalid_contours_discarded,
         despeckled_metrics.contours,
         despeckled_metrics.holes,
         despeckled_metrics.points,
+        svg_result.metrics.contours_simplified_away,
+        svg_result.metrics.contours_filtered_min_area,
+        svg_result.metrics.contours_suppressed_background,
         svg_result.metrics.contours_emitted,
         svg_result.metrics.holes_emitted,
         svg_result.metrics.points_emitted,
