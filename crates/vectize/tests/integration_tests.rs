@@ -143,6 +143,134 @@ fn trace_bytes_custom_config() {
 }
 
 #[test]
+fn trace_bytes_result_exposes_debug_data() {
+    let img = make_solid_image(12, 10, Rgba([20, 40, 60, 255]));
+    let bytes = encode_png(&img);
+
+    let tracer = Tracer::with_preset(QualityPreset::Balanced);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+
+    assert_eq!(result.width(), 12);
+    assert_eq!(result.height(), 10);
+    assert!(result.svg().contains("<svg"));
+    assert!(!result.debug().palette().is_empty());
+    assert!(!result.debug().regions().is_empty());
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+    assert!(
+        result.debug().regions()[0].hole_count() <= result.debug().regions()[0].contour_count()
+    );
+    assert!(metrics.contours_extracted() >= metrics.contours_after_despeckle());
+    assert!(metrics.contours_after_despeckle() >= metrics.contours_emitted());
+}
+
+#[test]
+fn trace_bytes_ring_image_preserves_hole() {
+    let img = ImageBuffer::from_fn(9, 9, |x, y| {
+        if (1..=7).contains(&x)
+            && (1..=7).contains(&y)
+            && !((3..=5).contains(&x) && (3..=5).contains(&y))
+        {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let tracer = Tracer::new(config);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+    let black_region = result
+        .debug()
+        .regions()
+        .iter()
+        .find(|region| region.color().to_hex() == "#000000")
+        .expect("black ring region should exist");
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+
+    assert_eq!(black_region.contour_count(), 2);
+    assert_eq!(black_region.hole_count(), 1);
+    assert!(metrics.contours_extracted() >= 2);
+    assert!(metrics.holes_extracted() >= 1);
+    assert!(metrics.holes_after_despeckle() >= 1);
+    assert!(metrics.holes_emitted() >= 1);
+    assert!(metrics.regions_emitted() >= 1);
+    assert!(result.svg().contains(r#"fill-rule="evenodd""#));
+}
+
+#[test]
+fn trace_bytes_result_reports_bezier_emitted_points() {
+    let img = ImageBuffer::from_fn(12, 12, |x, y| {
+        if (2..=9).contains(&x) && (2..=9).contains(&y) {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.6,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let tracer = Tracer::new(config);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+    let expected_emitted_points = result.svg().matches("M ").count()
+        + result.svg().matches(" L ").count()
+        + (result.svg().matches(" C ").count() * 3);
+
+    assert!(result.svg().contains(" C "));
+    assert!(metrics.contours_emitted() >= 1);
+    assert_eq!(metrics.points_emitted(), expected_emitted_points);
+}
+
+#[test]
+fn tracing_result_can_write_svg() {
+    let img = make_solid_image(6, 6, Rgba([80, 90, 100, 255]));
+    let bytes = encode_png(&img);
+    let output_path = std::env::temp_dir().join("vectize_test_tracing_result.svg");
+    let _ = std::fs::remove_file(&output_path);
+
+    let tracer = Tracer::with_preset(QualityPreset::Balanced);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+    result.write_svg(&output_path, false).unwrap();
+
+    assert!(output_path.exists());
+    let written = std::fs::read_to_string(&output_path).unwrap();
+    assert!(written.contains("<svg"));
+
+    let _ = std::fs::remove_file(&output_path);
+}
+
+#[test]
 fn trace_bytes_invalid_data_returns_error() {
     let tracer = Tracer::with_preset(QualityPreset::Balanced);
     let result = tracer.trace_bytes(b"not an image");
@@ -215,6 +343,12 @@ fn config_validation_comprehensive() {
     assert!(cfg.validate().is_err());
 
     cfg.color_count = 1;
+    assert!(cfg.validate().is_err());
+
+    cfg.color_count = 256;
+    assert!(cfg.validate().is_ok());
+
+    cfg.color_count = 257;
     assert!(cfg.validate().is_err());
 
     // Invalid: negative tolerance
@@ -357,6 +491,10 @@ fn error_display_messages() {
     let e = VectizeError::Pipeline("failed".to_string());
     let msg = format!("{e}");
     assert!(msg.contains("failed"));
+
+    let e = VectizeError::OutputExists("out.svg".to_string());
+    let msg = format!("{e}");
+    assert!(msg.contains("out.svg"));
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +518,7 @@ fn large_color_count() {
     let bytes = encode_png(&img);
 
     let mut config = TracingConfig::default();
-    config.color_count = 255; // Maximum
+    config.color_count = 256; // maximum
     let tracer = Tracer::new(config);
     let svg = tracer.trace_bytes(&bytes).unwrap();
     assert!(svg.contains("<svg"));

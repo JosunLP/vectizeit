@@ -19,6 +19,7 @@ vectizeit/
 │   │   │   ├── lib.rs
 │   │   │   ├── error.rs
 │   │   │   ├── config.rs
+│   │   │   ├── result.rs
 │   │   │   └── pipeline/
 │   │   │       ├── mod.rs
 │   │   │       ├── loader.rs
@@ -29,7 +30,7 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (22 tests)
+│   │       └── integration_tests.rs  # API & golden tests (25 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
@@ -64,12 +65,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **62+ automated tests** across three categories:
+The project includes **73 automated tests** across three categories:
 
 | Category | Location | Tests |
 |----------|----------|-------|
-| Unit tests | Embedded in each module (`#[cfg(test)]`) | 22 |
-| Integration tests | `crates/vectize/tests/integration_tests.rs` | 22 |
+| Unit tests | Embedded in each module (`#[cfg(test)]`) | 29 |
+| Integration tests | `crates/vectize/tests/integration_tests.rs` | 26 |
 | CLI smoke tests | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17 |
 | Doc tests | `crates/vectize/src/lib.rs` | 1 |
 
@@ -95,8 +96,8 @@ trace convert input.png -o output.svg
 # Use the high-quality preset
 trace convert input.webp --preset high
 
-# Customize palette size, tolerance, and smoothing
-trace convert photo.jpg --colors 32 --tolerance 0.5 --smoothing 0.7
+# Customize palette size, tolerance, smoothing, corners, and despeckling
+trace convert photo.jpg --colors 32 --tolerance 0.5 --smoothing 0.7 --corner-sensitivity 0.8 --despeckle-threshold 1.5
 
 # Write SVG to stdout (useful for piping)
 trace convert input.png --stdout
@@ -109,22 +110,28 @@ trace convert noisy.png --denoise
 
 # Set a custom alpha threshold
 trace convert transparent.png --alpha-threshold 64
+
+# Disable preprocessing for already-clean source art
+trace convert logo.png --no-preprocess
 ```
 
 ### Batch conversion
 
 ```bash
 # Convert all PNG/JPEG/WebP files in a directory
-trace batch ./images/ ./vectors/
+trace batch ./images/ ./vectors/ --format svg
 
 # Use a quality preset for the whole batch
-trace batch ./images/ ./vectors/ --preset fast
+trace batch ./images/ ./vectors/ --format svg --preset fast
 
 # Overwrite any existing SVG files
-trace batch ./images/ ./vectors/ --overwrite
+trace batch ./images/ ./vectors/ --format svg --overwrite
 
 # Verbose output
-trace batch ./images/ ./vectors/ -v
+trace batch ./images/ ./vectors/ --format svg -v
+
+# Apply the same tracing overrides to every file in the batch
+trace batch ./images/ ./vectors/ --format svg --colors 24 --tolerance 0.6 --denoise
 ```
 
 ### Help
@@ -152,8 +159,8 @@ vectize = { path = "crates/vectize" }
 use vectize::{Tracer, QualityPreset};
 
 let tracer = Tracer::with_preset(QualityPreset::High);
-let svg = tracer.trace_file("input.png")?;
-std::fs::write("output.svg", svg)?;
+let result = tracer.trace_file_result("input.png")?;
+result.write_svg("output.svg", true)?;
 ```
 
 ### Custom configuration
@@ -172,6 +179,34 @@ let config = TracingConfig {
 
 let tracer = Tracer::new(config);
 let svg = tracer.trace_file("photo.jpg")?;
+```
+
+### Inspect debug-oriented tracing data
+
+```rust
+use vectize::{QualityPreset, Tracer};
+
+let tracer = Tracer::with_preset(QualityPreset::Balanced);
+let result = tracer.trace_file_result("input.png")?;
+
+println!("palette colors: {}", result.debug().palette().len());
+if let Some(metrics) = result.stage_metrics() {
+    println!(
+        "extracted={} after_despeckle={} emitted={}",
+        metrics.contours_extracted(),
+        metrics.contours_after_despeckle(),
+        metrics.contours_emitted()
+    );
+}
+for region in result.debug().regions() {
+    println!(
+        "region {} contours={} holes={} points={}",
+        region.color().to_hex(),
+        region.contour_count(),
+        region.hole_count(),
+        region.total_points()
+    );
+}
 ```
 
 ### Trace from bytes (e.g. from an HTTP response)
@@ -205,7 +240,7 @@ The library processes images in seven sequential stages:
 | 1. Load | `pipeline::loader` | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header. |
 | 2. Preprocess | `pipeline::preprocess` | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background. |
 | 3. Segment | `pipeline::segment` | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space. |
-| 4. Contour | `pipeline::contour` | Trace the boundary of each color region using **Moore neighbor tracing** (8-connectivity) with Jacob's stopping criterion. |
+| 4. Contour | `pipeline::contour` | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. |
 | 5. Despeckle | `pipeline::mod` | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles. |
 | 6. Simplify | `pipeline::simplify` | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness. |
 | 7. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth polylines into **cubic Bezier splines** using Catmull-Rom tangents with **corner detection** (`corner_sensitivity`), then emit valid SVG markup with proper `viewBox`, `<path>` elements, and a white background rectangle. |
@@ -216,7 +251,7 @@ The library processes images in seven sequential stages:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `color_count` | `u8` | `16` | Number of palette colors (2–256) |
+| `color_count` | `u16` | `16` | Number of palette colors (2–256) |
 | `simplification_tolerance` | `f64` | `1.0` | RDP tolerance in pixels |
 | `min_region_area` | `f64` | `4.0` | Minimum polygon area to include |
 | `smoothing_strength` | `f64` | `0.5` | Bezier smoothing (0 = straight lines) |
@@ -251,8 +286,6 @@ The library processes images in seven sequential stages:
 
 ## Limitations and Tradeoffs
 
-- **No hole support.** The contour tracer only extracts outer boundaries. Shapes with holes
-  (e.g. the letter "O") are represented as filled regions; inner holes are not cut out.
 - **Pixel-grid coordinates.** Contours operate on integer pixel coordinates, so very small
   images may produce blocky results even at high quality settings.
 - **No path merging.** Adjacent regions of the same color from different quantization buckets
@@ -267,8 +300,6 @@ The library processes images in seven sequential stages:
 
 ## Future Improvements
 
-- [ ] **Hole / interior contour support** — distinguish outer from inner contours using
-  winding order and emit SVG `evenodd` fill rule or explicit cut-outs.
 - [ ] **Parallel region processing** — use `rayon` to process color regions concurrently.
 - [ ] **Perceptual color quantization** — replace median-cut with a perceptually-uniform
   palette (e.g. Wu quantization or OCIAF).

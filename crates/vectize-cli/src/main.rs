@@ -7,13 +7,13 @@
 //! ```text
 //! trace convert input.png -o output.svg
 //! trace convert input.webp --preset high
-//! trace batch ./input-dir ./output-dir
+//! trace batch ./input-dir ./output-dir --format svg
 //! ```
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
-use log::{error, info, warn};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use log::{debug, error, info, warn};
 use vectize::{QualityPreset, Tracer, TracingConfig};
 
 /// trace: high-quality raster-to-vector image tracing tool
@@ -27,7 +27,7 @@ use vectize::{QualityPreset, Tracer, TracingConfig};
         Examples:\n  \
         trace convert input.png -o output.svg\n  \
         trace convert input.webp --preset high\n  \
-        trace batch ./input-dir ./output-dir"
+        trace batch ./input-dir ./output-dir --format svg"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -61,7 +61,7 @@ struct ConvertArgs {
 
     /// Number of colors in the output palette (2–256)
     #[arg(long)]
-    colors: Option<u8>,
+    colors: Option<u16>,
 
     /// Polygon simplification tolerance in pixels (default: 1.0)
     #[arg(long)]
@@ -75,13 +75,25 @@ struct ConvertArgs {
     #[arg(long)]
     smoothing: Option<f64>,
 
+    /// Corner sensitivity 0.0–1.0 (higher preserves sharper corners)
+    #[arg(long)]
+    corner_sensitivity: Option<f64>,
+
     /// Enable Gaussian denoising before tracing
     #[arg(long)]
     denoise: bool,
 
+    /// Disable preprocessing before tracing
+    #[arg(long)]
+    no_preprocess: bool,
+
     /// Alpha threshold 0–255; pixels below are transparent (default: 128)
     #[arg(long)]
     alpha_threshold: Option<u8>,
+
+    /// Minimum contour perimeter to keep during despeckling
+    #[arg(long)]
+    despeckle_threshold: Option<f64>,
 
     /// Overwrite output file if it already exists
     #[arg(long)]
@@ -105,13 +117,49 @@ struct BatchArgs {
     /// Output directory for SVG files
     output_dir: PathBuf,
 
+    /// Output format (currently only SVG is supported)
+    #[arg(long, value_enum, default_value_t = OutputFormat::Svg)]
+    format: OutputFormat,
+
     /// Quality preset: fast, balanced (default), or high
     #[arg(long, default_value = "balanced")]
     preset: String,
 
     /// Number of colors in the output palette (2–256)
     #[arg(long)]
-    colors: Option<u8>,
+    colors: Option<u16>,
+
+    /// Polygon simplification tolerance in pixels
+    #[arg(long)]
+    tolerance: Option<f64>,
+
+    /// Minimum region area in pixels to include
+    #[arg(long)]
+    min_area: Option<f64>,
+
+    /// Smoothing strength 0.0–1.0
+    #[arg(long)]
+    smoothing: Option<f64>,
+
+    /// Corner sensitivity 0.0–1.0 (higher preserves sharper corners)
+    #[arg(long)]
+    corner_sensitivity: Option<f64>,
+
+    /// Alpha threshold 0–255; pixels below are transparent
+    #[arg(long)]
+    alpha_threshold: Option<u8>,
+
+    /// Minimum contour perimeter to keep during despeckling
+    #[arg(long)]
+    despeckle_threshold: Option<f64>,
+
+    /// Enable Gaussian denoising before tracing
+    #[arg(long)]
+    denoise: bool,
+
+    /// Disable preprocessing before tracing
+    #[arg(long)]
+    no_preprocess: bool,
 
     /// Overwrite existing output files
     #[arg(long)]
@@ -120,6 +168,11 @@ struct BatchArgs {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OutputFormat {
+    Svg,
 }
 
 fn main() {
@@ -169,11 +222,20 @@ fn build_config(preset_str: &str, overrides: ConfigOverrides) -> Result<TracingC
     if let Some(s) = overrides.smoothing {
         config.smoothing_strength = s;
     }
+    if let Some(cs) = overrides.corner_sensitivity {
+        config.corner_sensitivity = cs;
+    }
     if let Some(at) = overrides.alpha_threshold {
         config.alpha_threshold = at;
     }
+    if let Some(dt) = overrides.despeckle_threshold {
+        config.despeckle_threshold = dt;
+    }
     if overrides.denoise {
         config.enable_denoising = true;
+    }
+    if overrides.no_preprocess {
+        config.enable_preprocessing = false;
     }
 
     config.validate()?;
@@ -181,12 +243,15 @@ fn build_config(preset_str: &str, overrides: ConfigOverrides) -> Result<TracingC
 }
 
 struct ConfigOverrides {
-    colors: Option<u8>,
+    colors: Option<u16>,
     tolerance: Option<f64>,
     min_area: Option<f64>,
     smoothing: Option<f64>,
+    corner_sensitivity: Option<f64>,
     alpha_threshold: Option<u8>,
+    despeckle_threshold: Option<f64>,
     denoise: bool,
+    no_preprocess: bool,
 }
 
 fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -197,8 +262,11 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
             tolerance: args.tolerance,
             min_area: args.min_area,
             smoothing: args.smoothing,
+            corner_sensitivity: args.corner_sensitivity,
             alpha_threshold: args.alpha_threshold,
+            despeckle_threshold: args.despeckle_threshold,
             denoise: args.denoise,
+            no_preprocess: args.no_preprocess,
         },
     )
     .map_err(vectize::VectizeError::InvalidConfig)?;
@@ -210,10 +278,11 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let tracer = Tracer::new(config);
-    let svg = tracer.trace_file(&args.input)?;
+    let result = tracer.trace_file_result(&args.input)?;
+    log_stage_metrics(&result);
 
     if args.stdout {
-        print!("{svg}");
+        print!("{}", result.svg());
         return Ok(());
     }
 
@@ -227,13 +296,9 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
             "Output file '{}' already exists. Use --overwrite to replace it.",
             output_path.display()
         );
-        return Err(Box::new(vectize::VectizeError::InvalidConfig(format!(
-            "Output file '{}' already exists",
-            output_path.display()
-        ))));
     }
 
-    std::fs::write(&output_path, &svg)?;
+    result.write_svg(&output_path, args.overwrite)?;
     info!("Saved SVG to '{}'", output_path.display());
 
     Ok(())
@@ -244,11 +309,14 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
         &args.preset,
         ConfigOverrides {
             colors: args.colors,
-            tolerance: None,
-            min_area: None,
-            smoothing: None,
-            alpha_threshold: None,
-            denoise: false,
+            tolerance: args.tolerance,
+            min_area: args.min_area,
+            smoothing: args.smoothing,
+            corner_sensitivity: args.corner_sensitivity,
+            alpha_threshold: args.alpha_threshold,
+            despeckle_threshold: args.despeckle_threshold,
+            denoise: args.denoise,
+            no_preprocess: args.no_preprocess,
         },
     )
     .map_err(vectize::VectizeError::InvalidConfig)?;
@@ -286,7 +354,10 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         total += 1;
         let stem = path.file_stem().unwrap_or_default();
-        let output_path = args.output_dir.join(stem).with_extension("svg");
+        let output_path = args
+            .output_dir
+            .join(stem)
+            .with_extension(args.format.extension());
 
         if output_path.exists() && !args.overwrite {
             warn!(
@@ -297,9 +368,10 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         info!("Tracing '{}'", path.display());
-        match tracer.trace_file(&path) {
-            Ok(svg) => {
-                if let Err(e) = std::fs::write(&output_path, &svg) {
+        match tracer.trace_file_result(&path) {
+            Ok(result) => {
+                log_stage_metrics(&result);
+                if let Err(e) = result.write_svg(&output_path, args.overwrite) {
                     error!("Failed to write '{}': {e}", output_path.display());
                 } else {
                     info!("  → '{}'", output_path.display());
@@ -314,4 +386,29 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Batch complete: {succeeded}/{total} files converted successfully.");
     Ok(())
+}
+
+fn log_stage_metrics(result: &vectize::TracingResult) {
+    let Some(metrics) = result.stage_metrics() else {
+        return;
+    };
+
+    debug!(
+        "Trace metrics: extracted_contours={} extracted_holes={} after_despeckle={} emitted_regions={} emitted_contours={} emitted_holes={} emitted_points={}",
+        metrics.contours_extracted(),
+        metrics.holes_extracted(),
+        metrics.contours_after_despeckle(),
+        metrics.regions_emitted(),
+        metrics.contours_emitted(),
+        metrics.holes_emitted(),
+        metrics.points_emitted()
+    );
+}
+
+impl OutputFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            OutputFormat::Svg => "svg",
+        }
+    }
 }

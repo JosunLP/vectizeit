@@ -7,7 +7,7 @@
 //! 1. **Preprocessing** – normalize to RGBA8, optionally denoise
 //! 2. **Alpha compositing** – composite transparent pixels against white
 //! 3. **Color quantization** – median-cut palette reduction
-//! 4. **Contour extraction** – Moore neighbor boundary tracing
+//! 4. **Contour extraction** – deterministic grid-edge tracing with hole preservation
 //! 5. **Despeckle** – remove tiny contours below the threshold
 //! 6. **Region assembly** – build color regions from contour data
 //! 7. **SVG generation** – simplification, curve fitting, and SVG emission
@@ -25,14 +25,23 @@ use log::debug;
 
 use crate::config::TracingConfig;
 use crate::error::Result;
+use crate::result::{TraceDebugInfo, TraceStageMetrics, TracedRegionSummary, TracingResult};
 
-use self::contour::Contour;
-use self::svg::ColorRegion;
+use self::contour::{contour_is_hole, Contour};
+use self::svg::{generate_svg_with_metrics, ColorRegion};
 
 /// Run the complete vectorization pipeline on a decoded image.
 ///
 /// Returns the SVG as a `String`.
 pub fn run_pipeline(img: &DynamicImage, config: &TracingConfig) -> Result<String> {
+    Ok(run_pipeline_with_debug(img, config)?.into_svg())
+}
+
+/// Run the complete vectorization pipeline and keep debug-oriented stage data.
+pub fn run_pipeline_with_debug(
+    img: &DynamicImage,
+    config: &TracingConfig,
+) -> Result<TracingResult> {
     debug!(
         "Pipeline: preprocessing image ({}×{})",
         img.width(),
@@ -55,9 +64,11 @@ pub fn run_pipeline(img: &DynamicImage, config: &TracingConfig) -> Result<String
     // Stage 4: Contour extraction
     debug!("Pipeline: extracting contours");
     let contour_groups = contour::extract_contours(&segmentation);
+    let extracted_metrics = summarize_contours(&contour_groups);
 
     // Stage 5: Despeckle – remove tiny contours below perimeter threshold
     let contour_groups = despeckle(contour_groups, config.despeckle_threshold);
+    let despeckled_metrics = summarize_contours(&contour_groups);
 
     // Stage 6: Build color regions for SVG generation
     let width = segmentation.width;
@@ -74,9 +85,45 @@ pub fn run_pipeline(img: &DynamicImage, config: &TracingConfig) -> Result<String
     debug!("Pipeline: generating SVG ({} color regions)", regions.len());
 
     // Stage 7: SVG generation (includes simplification + curve fitting)
-    let svg = svg::generate_svg(&regions, width, height, config);
+    let debug = TraceDebugInfo::new(
+        segmentation.palette.clone(),
+        regions
+            .iter()
+            .map(|region| {
+                TracedRegionSummary::new(
+                    region.color,
+                    region.contours.len(),
+                    region
+                        .contours
+                        .iter()
+                        .filter(|contour| contour_is_hole(contour))
+                        .count(),
+                    region.contours.iter().map(std::vec::Vec::len).sum(),
+                )
+            })
+            .collect(),
+    );
+    let svg_result = generate_svg_with_metrics(&regions, width, height, config);
+    let stage_metrics = TraceStageMetrics::new(
+        extracted_metrics.contours,
+        extracted_metrics.holes,
+        extracted_metrics.points,
+        despeckled_metrics.contours,
+        despeckled_metrics.holes,
+        despeckled_metrics.points,
+        svg_result.metrics.contours_emitted,
+        svg_result.metrics.holes_emitted,
+        svg_result.metrics.points_emitted,
+        svg_result.metrics.regions_emitted,
+    );
 
-    Ok(svg)
+    Ok(TracingResult::with_stage_metrics(
+        svg_result.svg,
+        width,
+        height,
+        debug,
+        stage_metrics,
+    ))
 }
 
 /// Remove contours whose perimeter is below the despeckle threshold.
@@ -120,6 +167,28 @@ fn contour_perimeter(contour: &Contour) -> f64 {
     perimeter
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ContourStageSummary {
+    contours: usize,
+    holes: usize,
+    points: usize,
+}
+
+fn summarize_contours(contour_groups: &[(u8, Vec<Contour>)]) -> ContourStageSummary {
+    let mut summary = ContourStageSummary::default();
+
+    for (_, contours) in contour_groups {
+        summary.contours += contours.len();
+        summary.holes += contours
+            .iter()
+            .filter(|contour| contour_is_hole(contour))
+            .count();
+        summary.points += contours.iter().map(std::vec::Vec::len).sum::<usize>();
+    }
+
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +225,31 @@ mod tests {
         ];
         let p = contour_perimeter(&pts);
         assert!((p - 40.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn summarize_contours_counts_holes_and_points() {
+        let groups = vec![(
+            0u8,
+            vec![
+                vec![
+                    Point::new(0, 0),
+                    Point::new(4, 0),
+                    Point::new(4, 4),
+                    Point::new(0, 4),
+                ],
+                vec![
+                    Point::new(1, 1),
+                    Point::new(1, 3),
+                    Point::new(3, 3),
+                    Point::new(3, 1),
+                ],
+            ],
+        )];
+
+        let summary = summarize_contours(&groups);
+        assert_eq!(summary.contours, 2);
+        assert_eq!(summary.holes, 1);
+        assert_eq!(summary.points, 8);
     }
 }

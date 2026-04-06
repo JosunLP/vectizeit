@@ -1,10 +1,10 @@
 //! SVG generation from traced contours and Bezier paths.
 //!
-//! Produces valid, clean SVG markup with proper viewBox, path elements,
-//! and deterministic output.
+//! Produces valid, clean SVG markup with proper viewBox, hole-preserving path
+//! elements, and deterministic output.
 
 use crate::config::TracingConfig;
-use crate::pipeline::contour::{Contour, Point};
+use crate::pipeline::contour::{contour_is_hole, Contour, Point};
 use crate::pipeline::curves::fit_cubic_beziers;
 use crate::pipeline::segment::PaletteColor;
 use crate::pipeline::simplify::simplify;
@@ -15,6 +15,34 @@ pub struct ColorRegion {
     pub contours: Vec<Contour>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SvgEmissionMetrics {
+    pub regions_emitted: usize,
+    pub contours_emitted: usize,
+    pub holes_emitted: usize,
+    pub points_emitted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SvgBuildResult {
+    pub svg: String,
+    pub metrics: SvgEmissionMetrics,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PathBuildResult {
+    data: String,
+    contours_emitted: usize,
+    holes_emitted: usize,
+    points_emitted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PathGeometry {
+    data: String,
+    emitted_points: usize,
+}
+
 /// Generate an SVG document from color regions.
 pub fn generate_svg(
     regions: &[ColorRegion],
@@ -22,7 +50,17 @@ pub fn generate_svg(
     height: u32,
     config: &TracingConfig,
 ) -> String {
+    generate_svg_with_metrics(regions, width, height, config).svg
+}
+
+pub(crate) fn generate_svg_with_metrics(
+    regions: &[ColorRegion],
+    width: u32,
+    height: u32,
+    config: &TracingConfig,
+) -> SvgBuildResult {
     let mut svg = String::new();
+    let mut metrics = SvgEmissionMetrics::default();
 
     // SVG header
     svg.push_str(&format!(
@@ -41,24 +79,31 @@ pub fn generate_svg(
     for region in regions {
         let hex = region.color.to_hex();
 
-        let path_data = build_path_data(&region.contours, config);
-        if path_data.trim().is_empty() {
+        let path_result = build_path_data(&region.contours, config);
+        if path_result.data.trim().is_empty() {
             continue;
         }
 
         svg.push_str(&format!(
-            r#"  <path fill="{hex}" stroke="none" d="{path_data}"/>
-"#
+            r#"  <path fill="{hex}" fill-rule="evenodd" stroke="none" d="{path_data}"/>
+"#,
+            path_data = path_result.data
         ));
+
+        metrics.regions_emitted += 1;
+        metrics.contours_emitted += path_result.contours_emitted;
+        metrics.holes_emitted += path_result.holes_emitted;
+        metrics.points_emitted += path_result.points_emitted;
     }
 
     svg.push_str("</svg>\n");
-    svg
+    SvgBuildResult { svg, metrics }
 }
 
 /// Build SVG path data string from a list of contours.
-fn build_path_data(contours: &[Contour], config: &TracingConfig) -> String {
+fn build_path_data(contours: &[Contour], config: &TracingConfig) -> PathBuildResult {
     let mut parts = Vec::new();
+    let mut result = PathBuildResult::default();
 
     for contour in contours {
         if contour.len() < 3 {
@@ -77,7 +122,7 @@ fn build_path_data(contours: &[Contour], config: &TracingConfig) -> String {
             continue;
         }
 
-        let path = if config.smoothing_strength > 0.01 {
+        let geometry = if config.smoothing_strength > 0.01 {
             // Use cubic Bezier curves for smoother output
             build_bezier_path(
                 &simplified,
@@ -89,14 +134,20 @@ fn build_path_data(contours: &[Contour], config: &TracingConfig) -> String {
             build_linear_path(&simplified)
         };
 
-        parts.push(path);
+        parts.push(geometry.data);
+        result.contours_emitted += 1;
+        result.points_emitted += geometry.emitted_points;
+        if contour_is_hole(&simplified) {
+            result.holes_emitted += 1;
+        }
     }
 
-    parts.join(" ")
+    result.data = parts.join(" ");
+    result
 }
 
 /// Build a path using straight line segments.
-fn build_linear_path(points: &[Point]) -> String {
+fn build_linear_path(points: &[Point]) -> PathGeometry {
     let mut d = String::new();
     for (i, p) in points.iter().enumerate() {
         if i == 0 {
@@ -106,11 +157,14 @@ fn build_linear_path(points: &[Point]) -> String {
         }
     }
     d.push_str(" Z");
-    d
+    PathGeometry {
+        data: d,
+        emitted_points: points.len(),
+    }
 }
 
 /// Build a path using cubic Bezier curves.
-fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) -> String {
+fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) -> PathGeometry {
     let beziers = fit_cubic_beziers(points, smoothing, corner_sensitivity);
     if beziers.is_empty() {
         return build_linear_path(points);
@@ -126,7 +180,12 @@ fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) 
         ));
     }
     d.push_str(" Z");
-    d
+    PathGeometry {
+        data: d,
+        // One coordinate pair is emitted by the initial `M`, and each cubic
+        // `C` segment contributes three more coordinate pairs.
+        emitted_points: 1 + (beziers.len() * 3),
+    }
 }
 
 /// Calculate the signed area of a polygon using the shoelace formula.
@@ -169,5 +228,88 @@ mod tests {
         assert!(svg.contains(r#"<svg xmlns="http://www.w3.org/2000/svg""#));
         assert!(svg.contains(r#"viewBox="0 0 100 100""#));
         assert!(svg.contains("</svg>"));
+    }
+
+    #[test]
+    fn generate_svg_uses_evenodd_fill_rule() {
+        let config = crate::config::TracingConfig::default();
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![
+                vec![
+                    Point::new(0, 0),
+                    Point::new(4, 0),
+                    Point::new(4, 4),
+                    Point::new(0, 4),
+                ],
+                vec![
+                    Point::new(1, 1),
+                    Point::new(1, 3),
+                    Point::new(3, 3),
+                    Point::new(3, 1),
+                ],
+            ],
+        }];
+
+        let svg = generate_svg(&regions, 4, 4, &config);
+        assert!(svg.contains(r#"fill-rule="evenodd""#));
+    }
+
+    #[test]
+    fn generate_svg_with_metrics_counts_emitted_geometry() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.0,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![
+                vec![
+                    Point::new(0, 0),
+                    Point::new(4, 0),
+                    Point::new(4, 4),
+                    Point::new(0, 4),
+                ],
+                vec![
+                    Point::new(1, 1),
+                    Point::new(1, 3),
+                    Point::new(3, 3),
+                    Point::new(3, 1),
+                ],
+            ],
+        }];
+
+        let result = generate_svg_with_metrics(&regions, 4, 4, &config);
+        assert_eq!(result.metrics.regions_emitted, 1);
+        assert_eq!(result.metrics.contours_emitted, 2);
+        assert_eq!(result.metrics.holes_emitted, 1);
+        assert_eq!(result.metrics.points_emitted, 8);
+    }
+
+    #[test]
+    fn generate_svg_with_metrics_counts_bezier_control_points() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.6,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![vec![
+                Point::new(0, 0),
+                Point::new(4, 0),
+                Point::new(4, 4),
+                Point::new(0, 4),
+            ]],
+        }];
+
+        let result = generate_svg_with_metrics(&regions, 4, 4, &config);
+        assert!(result.svg.contains(" C "));
+        assert_eq!(result.metrics.regions_emitted, 1);
+        assert_eq!(result.metrics.contours_emitted, 1);
+        assert_eq!(result.metrics.points_emitted, 10);
     }
 }

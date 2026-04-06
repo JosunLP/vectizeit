@@ -44,7 +44,7 @@ pub struct SegmentationResult {
 /// a palette index.
 pub fn quantize(
     img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    color_count: u8,
+    color_count: u16,
     alpha_threshold: u8,
 ) -> SegmentationResult {
     let (width, height) = img.dimensions();
