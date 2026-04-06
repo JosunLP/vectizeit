@@ -1,0 +1,20 @@
+[package]
+name = "vectize-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for vectize raster-to-vector tracing"
+license = "MIT"
+
+[[bin]]
+name = "trace"
+path = "src/main.rs"
+
+[dependencies]
+vectize = { path = "../vectize" }
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+rayon = "1"
+
+[dev-dependencies]
+image = { version = "0.25", features = ["png"] }

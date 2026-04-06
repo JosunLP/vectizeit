@@ -1,0 +1,15 @@
+[package]
+name = "vectize"
+version = "0.1.0"
+edition = "2021"
+description = "High-quality raster-to-vector image tracing library"
+license = "MIT"
+
+[dependencies]
+image = { version = "0.25", features = ["png", "jpeg", "webp"] }
+thiserror = "1"
+log = "0.4"
+rayon = "1"
+
+[dev-dependencies]
+env_logger = "0.11"
