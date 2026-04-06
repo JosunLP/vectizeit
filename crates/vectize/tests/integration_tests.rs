@@ -480,7 +480,7 @@ fn large_color_count() {
     let bytes = encode_png(&img);
 
     let mut config = TracingConfig::default();
-    config.color_count = 256; // Maximum
+    config.color_count = 256; // maximum
     let tracer = Tracer::new(config);
     let svg = tracer.trace_bytes(&bytes).unwrap();
     assert!(svg.contains("<svg"));
