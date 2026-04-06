@@ -182,6 +182,8 @@ fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) 
     d.push_str(" Z");
     PathGeometry {
         data: d,
+        // One coordinate pair is emitted by the initial `M`, and each cubic
+        // `C` segment contributes three more coordinate pairs.
         emitted_points: 1 + (beziers.len() * 3),
     }
 }

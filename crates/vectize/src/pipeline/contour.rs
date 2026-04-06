@@ -241,7 +241,6 @@ fn direction_from_edge(edge: Edge) -> Option<Direction> {
 
 fn turn_priority(current: Direction, next: Direction) -> u8 {
     let delta = (next.index() - current.index()).rem_euclid(4);
-    debug_assert!((0..=3).contains(&delta));
 
     match delta {
         1 => 0, // right turn
