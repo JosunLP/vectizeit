@@ -168,6 +168,7 @@ fn tracing_result_can_write_svg() {
     let result = tracer.trace_bytes_result(&bytes).unwrap();
     result.write_svg(&output_path, false).unwrap();
 
+    assert!(output_path.exists());
     let written = std::fs::read_to_string(&output_path).unwrap();
     assert!(written.contains("<svg"));
 
@@ -395,6 +396,10 @@ fn error_display_messages() {
     let e = VectizeError::Pipeline("failed".to_string());
     let msg = format!("{e}");
     assert!(msg.contains("failed"));
+
+    let e = VectizeError::OutputExists("out.svg".to_string());
+    let msg = format!("{e}");
+    assert!(msg.contains("out.svg"));
 }
 
 // ---------------------------------------------------------------------------

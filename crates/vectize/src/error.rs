@@ -24,6 +24,10 @@ pub enum VectizeError {
     /// The input format is not supported.
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
+
+    /// The requested output file already exists and overwrite was not allowed.
+    #[error("Output file already exists: {0}")]
+    OutputExists(String),
 }
 
 /// A specialized `Result` type for vectize operations.

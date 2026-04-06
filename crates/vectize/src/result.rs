@@ -114,10 +114,7 @@ impl TracingResult {
     pub fn write_svg(&self, path: impl AsRef<Path>, overwrite: bool) -> Result<()> {
         let path = path.as_ref();
         if path.exists() && !overwrite {
-            return Err(VectizeError::InvalidConfig(format!(
-                "Output file '{}' already exists",
-                path.display()
-            )));
+            return Err(VectizeError::OutputExists(path.display().to_string()));
         }
 
         std::fs::write(path, self.svg())?;
