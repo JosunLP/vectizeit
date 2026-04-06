@@ -155,6 +155,50 @@ fn trace_bytes_result_exposes_debug_data() {
     assert!(result.svg().contains("<svg"));
     assert!(!result.debug().palette().is_empty());
     assert!(!result.debug().regions().is_empty());
+    assert!(
+        result.debug().regions()[0].hole_count() <= result.debug().regions()[0].contour_count()
+    );
+}
+
+#[test]
+fn trace_bytes_ring_image_preserves_hole() {
+    let img = ImageBuffer::from_fn(9, 9, |x, y| {
+        if (1..=7).contains(&x)
+            && (1..=7).contains(&y)
+            && !((3..=5).contains(&x) && (3..=5).contains(&y))
+        {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let tracer = Tracer::new(config);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+    let black_region = result
+        .debug()
+        .regions()
+        .iter()
+        .find(|region| region.color().to_hex() == "#000000")
+        .expect("black ring region should exist");
+
+    assert_eq!(black_region.contour_count(), 2);
+    assert_eq!(black_region.hole_count(), 1);
+    assert!(result.svg().contains(r#"fill-rule="evenodd""#));
 }
 
 #[test]

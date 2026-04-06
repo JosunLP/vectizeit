@@ -1,12 +1,15 @@
-//! Contour tracing using Moore neighbor contour following.
+//! Contour extraction from labeled regions using deterministic grid-edge tracing.
 //!
-//! For each color region (label), extract the outer boundary as a sequence
-//! of pixel coordinates forming closed polygons.
+//! For each color region, the tracer walks the exposed pixel edges and stitches
+//! them into closed polygon loops. This preserves interior holes and emits
+//! deterministic contour winding for SVG generation.
+
+use std::collections::{HashMap, HashSet};
 
 use super::segment::SegmentationResult;
 
 /// A 2D integer point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
@@ -21,18 +24,41 @@ impl Point {
 /// A contour: a closed sequence of points.
 pub type Contour = Vec<Point>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct Edge {
+    start: Point,
+    end: Point,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Up,
+    Right,
+    Down,
+    Left,
+}
+
+impl Direction {
+    fn index(self) -> i32 {
+        match self {
+            Direction::Up => 0,
+            Direction::Right => 1,
+            Direction::Down => 2,
+            Direction::Left => 3,
+        }
+    }
+}
+
 /// Extract contours for all color regions.
 ///
 /// Returns a list of `(palette_index, contours)` pairs.
 pub fn extract_contours(seg: &SegmentationResult) -> Vec<(u8, Vec<Contour>)> {
-    let w = seg.width as usize;
-    let h = seg.height as usize;
+    let width = seg.width as usize;
+    let height = seg.height as usize;
 
-    let num_colors = seg.palette.len();
-    let mut result: Vec<(u8, Vec<Contour>)> = Vec::new();
-
-    for color_idx in 0..num_colors as u8 {
-        let contours = trace_color_contours(&seg.labels, w, h, color_idx);
+    let mut result = Vec::new();
+    for color_idx in 0..seg.palette.len() as u8 {
+        let contours = trace_color_contours(&seg.labels, width, height, color_idx);
         if !contours.is_empty() {
             result.push((color_idx, contours));
         }
@@ -41,131 +67,200 @@ pub fn extract_contours(seg: &SegmentationResult) -> Vec<(u8, Vec<Contour>)> {
     result
 }
 
-/// Trace all contours for a single color label using a square-tracing algorithm.
+/// Return `true` when the contour represents an interior hole.
+pub fn contour_is_hole(contour: &Contour) -> bool {
+    signed_area(contour) < 0.0
+}
+
+/// Calculate the signed area of a contour using the shoelace formula.
+pub fn signed_area(contour: &Contour) -> f64 {
+    if contour.len() < 3 {
+        return 0.0;
+    }
+
+    let mut area = 0.0;
+    for i in 0..contour.len() {
+        let j = (i + 1) % contour.len();
+        area += contour[i].x as f64 * contour[j].y as f64;
+        area -= contour[j].x as f64 * contour[i].y as f64;
+    }
+
+    area / 2.0
+}
+
+/// Trace all contours for a single color label by extracting exposed pixel edges
+/// and stitching them into loops.
 fn trace_color_contours(labels: &[u8], width: usize, height: usize, target: u8) -> Vec<Contour> {
-    // Create a binary mask for the target color
-    let mask: Vec<bool> = labels.iter().map(|&l| l == target).collect();
+    let mask: Vec<bool> = labels.iter().map(|&label| label == target).collect();
+    let edges = collect_boundary_edges(&mask, width, height);
+    trace_loops(edges)
+}
 
-    // Track which boundary pixels have been visited
-    let mut visited = vec![false; width * height];
-    let mut contours = Vec::new();
+fn collect_boundary_edges(mask: &[bool], width: usize, height: usize) -> Vec<Edge> {
+    let mut edges = Vec::new();
 
-    for start_y in 0..height {
-        for start_x in 0..width {
-            let idx = start_y * width + start_x;
-            if !mask[idx] || visited[idx] {
-                continue;
-            }
-            // Check if this pixel is a boundary pixel
-            if !is_boundary(&mask, start_x, start_y, width, height) {
+    for y in 0..height {
+        for x in 0..width {
+            if !mask[y * width + x] {
                 continue;
             }
 
-            // Trace the contour starting from this pixel
-            if let Some(contour) =
-                trace_single_contour(&mask, &mut visited, start_x, start_y, width, height)
-            {
-                if contour.len() >= 3 {
-                    contours.push(contour);
-                }
+            let x = x as i32;
+            let y = y as i32;
+
+            if y == 0 || !mask[(y as usize - 1) * width + x as usize] {
+                edges.push(Edge {
+                    start: Point::new(x, y),
+                    end: Point::new(x + 1, y),
+                });
+            }
+            if x as usize + 1 >= width || !mask[y as usize * width + x as usize + 1] {
+                edges.push(Edge {
+                    start: Point::new(x + 1, y),
+                    end: Point::new(x + 1, y + 1),
+                });
+            }
+            if y as usize + 1 >= height || !mask[(y as usize + 1) * width + x as usize] {
+                edges.push(Edge {
+                    start: Point::new(x + 1, y + 1),
+                    end: Point::new(x, y + 1),
+                });
+            }
+            if x == 0 || !mask[y as usize * width + x as usize - 1] {
+                edges.push(Edge {
+                    start: Point::new(x, y + 1),
+                    end: Point::new(x, y),
+                });
             }
         }
     }
 
+    edges.sort_unstable();
+    edges
+}
+
+fn trace_loops(edges: Vec<Edge>) -> Vec<Contour> {
+    let mut outgoing: HashMap<Point, Vec<Point>> = HashMap::new();
+    for edge in &edges {
+        outgoing.entry(edge.start).or_default().push(edge.end);
+    }
+    for ends in outgoing.values_mut() {
+        ends.sort_unstable();
+    }
+
+    let mut unused: HashSet<Edge> = edges.iter().copied().collect();
+    let mut contours = Vec::new();
+
+    for edge in edges {
+        if !unused.contains(&edge) {
+            continue;
+        }
+
+        let contour = trace_loop(edge, &outgoing, &mut unused);
+        if contour.len() >= 3 {
+            contours.push(contour);
+        }
+    }
+
+    contours.sort_by(|left, right| {
+        contour_sort_key(left)
+            .cmp(&contour_sort_key(right))
+            .then_with(|| left.len().cmp(&right.len()))
+    });
     contours
 }
 
-/// Check if a pixel is on the boundary of a color region.
-fn is_boundary(mask: &[bool], x: usize, y: usize, width: usize, height: usize) -> bool {
-    if !mask[y * width + x] {
-        return false;
-    }
-    // A pixel is on the boundary if any of its 4-neighbors is outside the region
-    let neighbors = [
-        (x.wrapping_sub(1), y),
-        (x + 1, y),
-        (x, y.wrapping_sub(1)),
-        (x, y + 1),
-    ];
-    neighbors
-        .iter()
-        .any(|&(nx, ny)| nx >= width || ny >= height || !mask[ny * width + nx])
-}
-
-/// Trace a single contour using Moore neighbor tracing (Jacob's stopping criterion).
-fn trace_single_contour(
-    mask: &[bool],
-    visited: &mut [bool],
-    start_x: usize,
-    start_y: usize,
-    width: usize,
-    height: usize,
-) -> Option<Contour> {
-    // 8-connectivity Moore neighbors in order: E, SE, S, SW, W, NW, N, NE
-    const DIRS: [(i32, i32); 8] = [
-        (1, 0),
-        (1, 1),
-        (0, 1),
-        (-1, 1),
-        (-1, 0),
-        (-1, -1),
-        (0, -1),
-        (1, -1),
-    ];
-
-    let mut contour = Vec::new();
-    let start = Point::new(start_x as i32, start_y as i32);
-
-    let mut current = start;
-    let mut dir = 7usize; // Start checking from NE direction
-
-    let max_iter = width * height + 10;
-    let mut iter_count = 0;
+fn trace_loop(
+    start_edge: Edge,
+    outgoing: &HashMap<Point, Vec<Point>>,
+    unused: &mut HashSet<Edge>,
+) -> Contour {
+    let mut contour = vec![start_edge.start];
+    let mut current_edge = start_edge;
 
     loop {
-        contour.push(current);
-        visited[(current.y as usize) * width + (current.x as usize)] = true;
+        unused.remove(&current_edge);
 
-        // Find the next boundary pixel
-        let mut found = false;
-        for i in 0..8 {
-            let d = (dir + i) % 8;
-            let nx = current.x + DIRS[d].0;
-            let ny = current.y + DIRS[d].1;
-
-            if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
-                continue;
-            }
-
-            if mask[ny as usize * width + nx as usize] {
-                // Rotate direction: the new "back" direction is the opposite of d
-                dir = (d + 5) % 8;
-                current = Point::new(nx, ny);
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            break; // isolated pixel
-        }
-
-        // Jacob's stopping criterion: return to start
-        if current == start && contour.len() > 1 {
+        let current_point = current_edge.end;
+        if current_point == start_edge.start {
             break;
         }
 
-        iter_count += 1;
-        if iter_count > max_iter {
-            break; // safety valve
-        }
+        contour.push(current_point);
+
+        let Some(next_point) = choose_next_point(current_edge, outgoing, unused) else {
+            break;
+        };
+
+        current_edge = Edge {
+            start: current_point,
+            end: next_point,
+        };
     }
 
-    if contour.is_empty() {
-        None
-    } else {
-        Some(contour)
+    contour
+}
+
+fn choose_next_point(
+    current_edge: Edge,
+    outgoing: &HashMap<Point, Vec<Point>>,
+    unused: &HashSet<Edge>,
+) -> Option<Point> {
+    let current_direction = direction_from_edge(current_edge)?;
+    let mut candidates: Vec<(u8, Point)> = outgoing
+        .get(&current_edge.end)?
+        .iter()
+        .copied()
+        .filter_map(|end| {
+            let next_edge = Edge {
+                start: current_edge.end,
+                end,
+            };
+            if !unused.contains(&next_edge) {
+                return None;
+            }
+
+            let direction = direction_from_edge(next_edge)?;
+            Some((turn_priority(current_direction, direction), end))
+        })
+        .collect();
+
+    candidates.sort_unstable_by_key(|(priority, point)| (*priority, *point));
+    candidates.first().map(|(_, point)| *point)
+}
+
+fn direction_from_edge(edge: Edge) -> Option<Direction> {
+    match (edge.end.x - edge.start.x, edge.end.y - edge.start.y) {
+        (0, -1) => Some(Direction::Up),
+        (1, 0) => Some(Direction::Right),
+        (0, 1) => Some(Direction::Down),
+        (-1, 0) => Some(Direction::Left),
+        _ => None,
     }
+}
+
+fn turn_priority(current: Direction, next: Direction) -> u8 {
+    match (next.index() - current.index()).rem_euclid(4) {
+        1 => 0, // right turn
+        0 => 1, // straight
+        3 => 2, // left turn
+        2 => 3, // reverse
+        _ => unreachable!(),
+    }
+}
+
+fn contour_sort_key(contour: &Contour) -> (i32, i32, i32, i32) {
+    let min_x = contour
+        .iter()
+        .map(|point| point.x)
+        .min()
+        .unwrap_or_default();
+    let min_y = contour
+        .iter()
+        .map(|point| point.y)
+        .min()
+        .unwrap_or_default();
+    (min_y, min_x, contour[0].y, contour[0].x)
 }
 
 #[cfg(test)]
@@ -175,7 +270,6 @@ mod tests {
 
     #[test]
     fn contour_rectangle() {
-        // 4x4 image: label 0 = 2x2 block in top-left
         let labels = vec![0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
         let seg = SegmentationResult {
             palette: vec![
@@ -186,7 +280,67 @@ mod tests {
             width: 4,
             height: 4,
         };
+
         let contours = extract_contours(&seg);
-        assert!(!contours.is_empty());
+        assert_eq!(contours[0].1.len(), 1);
+        assert!(signed_area(&contours[0].1[0]) > 0.0);
+    }
+
+    #[test]
+    fn contour_ring_preserves_hole() {
+        let labels = vec![
+            1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 0, 0, 0, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 0, 0, 0, 0, 1, //
+            1, 1, 1, 1, 1, 1, 1, //
+        ];
+        let seg = SegmentationResult {
+            palette: vec![
+                PaletteColor { r: 0, g: 0, b: 0 },
+                PaletteColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+            ],
+            labels,
+            width: 7,
+            height: 7,
+        };
+
+        let contours = extract_contours(&seg);
+        let black_contours = &contours[0].1;
+        assert_eq!(black_contours.len(), 2);
+        assert_eq!(
+            black_contours
+                .iter()
+                .filter(|contour| contour_is_hole(contour))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn diagonal_pixels_trace_as_separate_loops() {
+        let labels = vec![0, 1, 1, 0];
+        let seg = SegmentationResult {
+            palette: vec![
+                PaletteColor { r: 0, g: 0, b: 0 },
+                PaletteColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+            ],
+            labels,
+            width: 2,
+            height: 2,
+        };
+
+        let contours = extract_contours(&seg);
+        assert_eq!(contours[0].1.len(), 2);
     }
 }

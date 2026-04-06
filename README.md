@@ -30,7 +30,7 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (24 tests)
+│   │       └── integration_tests.rs  # API & golden tests (25 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
@@ -65,12 +65,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **65 automated tests** across three categories:
+The project includes **69 automated tests** across three categories:
 
 | Category | Location | Tests |
 |----------|----------|-------|
-| Unit tests | Embedded in each module (`#[cfg(test)]`) | 23 |
-| Integration tests | `crates/vectize/tests/integration_tests.rs` | 24 |
+| Unit tests | Embedded in each module (`#[cfg(test)]`) | 26 |
+| Integration tests | `crates/vectize/tests/integration_tests.rs` | 25 |
 | CLI smoke tests | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17 |
 | Doc tests | `crates/vectize/src/lib.rs` | 1 |
 
@@ -192,9 +192,10 @@ let result = tracer.trace_file_result("input.png")?;
 println!("palette colors: {}", result.debug().palette().len());
 for region in result.debug().regions() {
     println!(
-        "region {} contours={} points={}",
+        "region {} contours={} holes={} points={}",
         region.color().to_hex(),
         region.contour_count(),
+        region.hole_count(),
         region.total_points()
     );
 }
@@ -231,7 +232,7 @@ The library processes images in seven sequential stages:
 | 1. Load | `pipeline::loader` | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header. |
 | 2. Preprocess | `pipeline::preprocess` | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background. |
 | 3. Segment | `pipeline::segment` | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space. |
-| 4. Contour | `pipeline::contour` | Trace the boundary of each color region using **Moore neighbor tracing** (8-connectivity) with Jacob's stopping criterion. |
+| 4. Contour | `pipeline::contour` | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. |
 | 5. Despeckle | `pipeline::mod` | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles. |
 | 6. Simplify | `pipeline::simplify` | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness. |
 | 7. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth polylines into **cubic Bezier splines** using Catmull-Rom tangents with **corner detection** (`corner_sensitivity`), then emit valid SVG markup with proper `viewBox`, `<path>` elements, and a white background rectangle. |
@@ -277,8 +278,6 @@ The library processes images in seven sequential stages:
 
 ## Limitations and Tradeoffs
 
-- **No hole support.** The contour tracer only extracts outer boundaries. Shapes with holes
-  (e.g. the letter "O") are represented as filled regions; inner holes are not cut out.
 - **Pixel-grid coordinates.** Contours operate on integer pixel coordinates, so very small
   images may produce blocky results even at high quality settings.
 - **No path merging.** Adjacent regions of the same color from different quantization buckets
@@ -293,8 +292,6 @@ The library processes images in seven sequential stages:
 
 ## Future Improvements
 
-- [ ] **Hole / interior contour support** — distinguish outer from inner contours using
-  winding order and emit SVG `evenodd` fill rule or explicit cut-outs.
 - [ ] **Parallel region processing** — use `rayon` to process color regions concurrently.
 - [ ] **Perceptual color quantization** — replace median-cut with a perceptually-uniform
   palette (e.g. Wu quantization or OCIAF).

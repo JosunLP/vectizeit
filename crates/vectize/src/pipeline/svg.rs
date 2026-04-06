@@ -1,7 +1,7 @@
 //! SVG generation from traced contours and Bezier paths.
 //!
-//! Produces valid, clean SVG markup with proper viewBox, path elements,
-//! and deterministic output.
+//! Produces valid, clean SVG markup with proper viewBox, hole-preserving path
+//! elements, and deterministic output.
 
 use crate::config::TracingConfig;
 use crate::pipeline::contour::{Contour, Point};
@@ -47,7 +47,7 @@ pub fn generate_svg(
         }
 
         svg.push_str(&format!(
-            r#"  <path fill="{hex}" stroke="none" d="{path_data}"/>
+            r#"  <path fill="{hex}" fill-rule="evenodd" stroke="none" d="{path_data}"/>
 "#
         ));
     }
@@ -169,5 +169,30 @@ mod tests {
         assert!(svg.contains(r#"<svg xmlns="http://www.w3.org/2000/svg""#));
         assert!(svg.contains(r#"viewBox="0 0 100 100""#));
         assert!(svg.contains("</svg>"));
+    }
+
+    #[test]
+    fn generate_svg_uses_evenodd_fill_rule() {
+        let config = crate::config::TracingConfig::default();
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![
+                vec![
+                    Point::new(0, 0),
+                    Point::new(4, 0),
+                    Point::new(4, 4),
+                    Point::new(0, 4),
+                ],
+                vec![
+                    Point::new(1, 1),
+                    Point::new(1, 3),
+                    Point::new(3, 3),
+                    Point::new(3, 1),
+                ],
+            ],
+        }];
+
+        let svg = generate_svg(&regions, 4, 4, &config);
+        assert!(svg.contains(r#"fill-rule="evenodd""#));
     }
 }

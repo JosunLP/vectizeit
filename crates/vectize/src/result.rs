@@ -10,15 +10,22 @@ use crate::pipeline::segment::PaletteColor;
 pub struct TracedRegionSummary {
     color: PaletteColor,
     contour_count: usize,
+    hole_count: usize,
     total_points: usize,
 }
 
 impl TracedRegionSummary {
     /// Create a new region summary.
-    pub fn new(color: PaletteColor, contour_count: usize, total_points: usize) -> Self {
+    pub fn new(
+        color: PaletteColor,
+        contour_count: usize,
+        hole_count: usize,
+        total_points: usize,
+    ) -> Self {
         Self {
             color,
             contour_count,
+            hole_count,
             total_points,
         }
     }
@@ -31,6 +38,11 @@ impl TracedRegionSummary {
     /// Return the number of contours in this region.
     pub fn contour_count(&self) -> usize {
         self.contour_count
+    }
+
+    /// Return the number of interior hole contours in this region.
+    pub fn hole_count(&self) -> usize {
+        self.hole_count
     }
 
     /// Return the total traced point count across all contours.

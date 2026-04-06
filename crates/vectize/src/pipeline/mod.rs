@@ -7,7 +7,7 @@
 //! 1. **Preprocessing** – normalize to RGBA8, optionally denoise
 //! 2. **Alpha compositing** – composite transparent pixels against white
 //! 3. **Color quantization** – median-cut palette reduction
-//! 4. **Contour extraction** – Moore neighbor boundary tracing
+//! 4. **Contour extraction** – deterministic grid-edge tracing with hole preservation
 //! 5. **Despeckle** – remove tiny contours below the threshold
 //! 6. **Region assembly** – build color regions from contour data
 //! 7. **SVG generation** – simplification, curve fitting, and SVG emission
@@ -27,7 +27,7 @@ use crate::config::TracingConfig;
 use crate::error::Result;
 use crate::result::{TraceDebugInfo, TracedRegionSummary, TracingResult};
 
-use self::contour::Contour;
+use self::contour::{contour_is_hole, Contour};
 use self::svg::ColorRegion;
 
 /// Run the complete vectorization pipeline on a decoded image.
@@ -91,6 +91,11 @@ pub fn run_pipeline_with_debug(
                 TracedRegionSummary::new(
                     region.color,
                     region.contours.len(),
+                    region
+                        .contours
+                        .iter()
+                        .filter(|contour| contour_is_hole(contour))
+                        .count(),
                     region.contours.iter().map(std::vec::Vec::len).sum(),
                 )
             })
