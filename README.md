@@ -15,21 +15,25 @@ vectizeit/
 ├── Cargo.toml                  # Workspace manifest
 ├── crates/
 │   ├── vectize/                # Core library crate
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── error.rs
-│   │       ├── config.rs
-│   │       └── pipeline/
-│   │           ├── mod.rs
-│   │           ├── loader.rs
-│   │           ├── preprocess.rs
-│   │           ├── segment.rs
-│   │           ├── contour.rs
-│   │           ├── simplify.rs
-│   │           ├── curves.rs
-│   │           └── svg.rs
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── error.rs
+│   │   │   ├── config.rs
+│   │   │   └── pipeline/
+│   │   │       ├── mod.rs
+│   │   │       ├── loader.rs
+│   │   │       ├── preprocess.rs
+│   │   │       ├── segment.rs
+│   │   │       ├── contour.rs
+│   │   │       ├── simplify.rs
+│   │   │       ├── curves.rs
+│   │   │       └── svg.rs
+│   │   └── tests/
+│   │       └── integration_tests.rs  # API & golden tests (22 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
-│       └── src/main.rs
+│       ├── src/main.rs
+│       └── tests/
+│           └── cli_smoke_tests.rs    # CLI smoke tests (17 tests)
 ```
 
 ---
@@ -57,6 +61,24 @@ cargo clippy -- -D warnings
 # Apply auto-formatting
 cargo fmt
 ```
+
+### Test Coverage
+
+The project includes **62+ automated tests** across three categories:
+
+| Category | Location | Tests |
+|----------|----------|-------|
+| Unit tests | Embedded in each module (`#[cfg(test)]`) | 22 |
+| Integration tests | `crates/vectize/tests/integration_tests.rs` | 22 |
+| CLI smoke tests | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17 |
+| Doc tests | `crates/vectize/src/lib.rs` | 1 |
+
+Test types include:
+- **API integration tests** – end-to-end tracing from bytes and files
+- **Configuration validation** – all presets and error cases
+- **Golden / snapshot tests** – deterministic output verification
+- **CLI smoke tests** – help text, convert, batch, presets, options, error cases
+- **Edge cases** – 1×1 images, max colors, transparent images, no smoothing
 
 The `trace` binary is produced at `target/release/trace` (or `target/debug/trace` for debug builds).
 
@@ -176,16 +198,17 @@ if let Err(msg) = config.validate() {
 
 ## Pipeline Description
 
-The library processes images in six sequential stages:
+The library processes images in seven sequential stages:
 
 | Stage | Module | Description |
 |-------|--------|-------------|
 | 1. Load | `pipeline::loader` | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header. |
-| 2. Preprocess | `pipeline::preprocess` | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising, and composite transparent pixels against a white background. |
+| 2. Preprocess | `pipeline::preprocess` | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background. |
 | 3. Segment | `pipeline::segment` | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space. |
 | 4. Contour | `pipeline::contour` | Trace the boundary of each color region using **Moore neighbor tracing** (8-connectivity) with Jacob's stopping criterion. |
-| 5. Simplify | `pipeline::simplify` | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness. |
-| 6. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth polylines into **cubic Bezier splines** using Catmull-Rom tangents, then emit valid SVG markup with proper `viewBox`, `<path>` elements, and a white background rectangle. |
+| 5. Despeckle | `pipeline::mod` | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles. |
+| 6. Simplify | `pipeline::simplify` | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness. |
+| 7. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth polylines into **cubic Bezier splines** using Catmull-Rom tangents with **corner detection** (`corner_sensitivity`), then emit valid SVG markup with proper `viewBox`, `<path>` elements, and a white background rectangle. |
 
 ---
 
