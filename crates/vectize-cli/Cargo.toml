@@ -2,7 +2,7 @@
 name = "vectize-cli"
 version = "0.1.0"
 edition = "2021"
-description = "CLI for vectizeit raster-to-vector tracing"
+description = "CLI for vectize raster-to-vector tracing"
 license = "MIT"
 
 [[bin]]
