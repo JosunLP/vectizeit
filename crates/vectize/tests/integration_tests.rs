@@ -169,6 +169,7 @@ fn trace_bytes_emits_smaller_detail_after_larger_background() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
@@ -200,13 +201,14 @@ fn trace_bytes_omits_border_connected_white_path() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
 
-    assert!(svg.contains("fill=\"white\""));
+    assert!(svg.contains("fill=\"#ffffff\""));
     assert!(svg.contains("fill=\"#000000\""));
-    assert!(!svg.contains("fill=\"#ffffff\""));
+    // The redundant white contour is suppressed, so only 1 path remains.
     assert_eq!(svg.matches("<path").count(), 1);
 }
 
@@ -235,6 +237,7 @@ fn trace_bytes_keeps_interior_white_island_when_background_is_white() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
@@ -274,6 +277,7 @@ fn trace_bytes_stage_metrics_report_svg_filtered_contours() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
@@ -307,6 +311,7 @@ fn trace_bytes_uses_two_decimal_coordinate_precision() {
             enable_denoising: false,
             enable_preprocessing: true,
             quality_preset: QualityPreset::Balanced,
+            background_color: None,
         };
 
         let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
@@ -338,6 +343,7 @@ fn trace_bytes_smoothing_keeps_edge_touching_coordinates_inside_viewbox() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
@@ -408,6 +414,7 @@ fn trace_bytes_custom_config() {
         enable_denoising: true,
         enable_preprocessing: true,
         quality_preset: QualityPreset::High,
+        background_color: None,
     };
 
     let tracer = Tracer::new(config);
@@ -467,6 +474,7 @@ fn trace_bytes_ring_image_preserves_hole() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let tracer = Tracer::new(config);
@@ -517,6 +525,7 @@ fn trace_bytes_result_reports_bezier_emitted_points() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let tracer = Tracer::new(config);
@@ -549,6 +558,7 @@ fn trace_bytes_result_uses_closed_beziers_for_closed_contours() {
         enable_denoising: false,
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
+        background_color: None,
     };
 
     let tracer = Tracer::new(config);
@@ -787,7 +797,7 @@ fn svg_output_structure_golden() {
 
     // Must have white background rect
     assert!(svg.contains("<rect"));
-    assert!(svg.contains("fill=\"white\""));
+    assert!(svg.contains("fill=\"#ffffff\""));
 
     // Must close properly
     assert!(svg.trim_end().ends_with("</svg>"));

@@ -11,9 +11,11 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use log::{debug, error, info, warn};
+use rayon::prelude::*;
 use vectize::{QualityPreset, Tracer, TracingConfig};
 
 /// trace: high-quality raster-to-vector image tracing tool
@@ -95,6 +97,10 @@ struct ConvertArgs {
     #[arg(long)]
     despeckle_threshold: Option<f64>,
 
+    /// Background color as hex (e.g. "#ff0000" or "00ff00"); default is white
+    #[arg(long)]
+    background_color: Option<String>,
+
     /// Overwrite output file if it already exists
     #[arg(long)]
     overwrite: bool,
@@ -152,6 +158,10 @@ struct BatchArgs {
     /// Minimum contour perimeter to keep during despeckling
     #[arg(long)]
     despeckle_threshold: Option<f64>,
+
+    /// Background color as hex (e.g. "#ff0000" or "00ff00"); default is white
+    #[arg(long)]
+    background_color: Option<String>,
 
     /// Enable Gaussian denoising before tracing
     #[arg(long)]
@@ -237,9 +247,25 @@ fn build_config(preset_str: &str, overrides: ConfigOverrides) -> Result<TracingC
     if overrides.no_preprocess {
         config.enable_preprocessing = false;
     }
+    if let Some(ref hex) = overrides.background_color {
+        config.background_color = Some(parse_hex_color(hex)?);
+    }
 
     config.validate()?;
     Ok(config)
+}
+
+fn parse_hex_color(s: &str) -> Result<(u8, u8, u8), String> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 {
+        return Err(format!(
+            "Invalid hex color '{s}': expected 6 hex digits (e.g. \"#ff0000\")"
+        ));
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| format!("Invalid hex color '{s}'"))?;
+    let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| format!("Invalid hex color '{s}'"))?;
+    let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| format!("Invalid hex color '{s}'"))?;
+    Ok((r, g, b))
 }
 
 struct ConfigOverrides {
@@ -250,6 +276,7 @@ struct ConfigOverrides {
     corner_sensitivity: Option<f64>,
     alpha_threshold: Option<u8>,
     despeckle_threshold: Option<f64>,
+    background_color: Option<String>,
     denoise: bool,
     no_preprocess: bool,
 }
@@ -265,6 +292,7 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
             corner_sensitivity: args.corner_sensitivity,
             alpha_threshold: args.alpha_threshold,
             despeckle_threshold: args.despeckle_threshold,
+            background_color: args.background_color.clone(),
             denoise: args.denoise,
             no_preprocess: args.no_preprocess,
         },
@@ -315,6 +343,7 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
             corner_sensitivity: args.corner_sensitivity,
             alpha_threshold: args.alpha_threshold,
             despeckle_threshold: args.despeckle_threshold,
+            background_color: args.background_color.clone(),
             denoise: args.denoise,
             no_preprocess: args.no_preprocess,
         },
@@ -332,27 +361,29 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let extensions = ["png", "jpg", "jpeg", "webp"];
     let tracer = Tracer::new(config);
-    let mut total = 0usize;
-    let mut succeeded = 0usize;
+    let total = AtomicUsize::new(0);
+    let succeeded = AtomicUsize::new(0);
 
-    for entry in std::fs::read_dir(&args.input_dir)? {
-        let entry = entry?;
+    let entries: Vec<_> = std::fs::read_dir(&args.input_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return false;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            extensions.contains(&ext.as_str())
+        })
+        .collect();
+
+    entries.par_iter().for_each(|entry| {
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
+        total.fetch_add(1, Ordering::Relaxed);
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        if !extensions.contains(&ext.as_str()) {
-            continue;
-        }
-
-        total += 1;
         let stem = path.file_stem().unwrap_or_default();
         let output_path = args
             .output_dir
@@ -364,7 +395,7 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
                 "Skipping '{}': output already exists (use --overwrite)",
                 path.display()
             );
-            continue;
+            return;
         }
 
         info!("Tracing '{}'", path.display());
@@ -375,15 +406,17 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
                     error!("Failed to write '{}': {e}", output_path.display());
                 } else {
                     info!("  → '{}'", output_path.display());
-                    succeeded += 1;
+                    succeeded.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(e) => {
                 error!("Failed to trace '{}': {e}", path.display());
             }
         }
-    }
+    });
 
+    let total = total.load(Ordering::Relaxed);
+    let succeeded = succeeded.load(Ordering::Relaxed);
     info!("Batch complete: {succeeded}/{total} files converted successfully.");
     Ok(())
 }

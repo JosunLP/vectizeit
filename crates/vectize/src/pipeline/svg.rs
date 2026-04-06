@@ -6,9 +6,10 @@
 
 use crate::config::TracingConfig;
 use crate::pipeline::contour::{contour_is_hole, signed_area, Contour, Point};
-use crate::pipeline::curves::{fit_closed_cubic_beziers, CubicBezier};
+use crate::pipeline::curves::{fit_closed_cubic_beziers_f64, CubicBezier};
 use crate::pipeline::segment::PaletteColor;
 use crate::pipeline::simplify::simplify_closed;
+use crate::pipeline::smooth::smooth_closed_contour_multi;
 
 /// A color region consisting of a palette color and its contours.
 pub struct ColorRegion {
@@ -104,6 +105,9 @@ pub(crate) fn generate_svg_with_metrics(
     let mut metrics = SvgEmissionMetrics::default();
     let ordered_regions = order_regions_for_emission(regions);
 
+    let bg = config.background_color.unwrap_or((255, 255, 255));
+    let bg_fill = format!("#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2);
+
     // SVG header
     svg.push_str(&format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -111,9 +115,9 @@ pub(crate) fn generate_svg_with_metrics(
 "#
     ));
 
-    // Background white rectangle
+    // Background rectangle with configured color
     svg.push_str(&format!(
-        r#"  <rect width="{width}" height="{height}" fill="white"/>
+        r#"  <rect width="{width}" height="{height}" fill="{bg_fill}"/>
 "#
     ));
 
@@ -178,7 +182,7 @@ fn build_region_paths(
     height: u32,
     config: &TracingConfig,
 ) -> RegionBuildResult {
-    let plan = region_path_groups(region, width, height);
+    let plan = region_path_groups(region, width, height, config);
 
     RegionBuildResult {
         paths: plan
@@ -198,13 +202,18 @@ fn build_region_paths(
     }
 }
 
-fn region_path_groups(region: &ColorRegion, width: u32, height: u32) -> RegionPathPlan {
+fn region_path_groups(
+    region: &ColorRegion,
+    width: u32,
+    height: u32,
+    config: &TracingConfig,
+) -> RegionPathPlan {
     if region.contours.is_empty() {
         return RegionPathPlan::default();
     }
 
     let hierarchy = build_contour_hierarchy(&region.contours);
-    let suppressed = suppressed_background_contours(region, width, height);
+    let suppressed = suppressed_background_contours(region, width, height, config);
     let mut roots = Vec::new();
     let mut root_mask = vec![false; region.contours.len()];
 
@@ -285,8 +294,13 @@ fn build_contour_hierarchy(contours: &[Contour]) -> Vec<ContourHierarchyNode> {
     hierarchy
 }
 
-fn suppressed_background_contours(region: &ColorRegion, width: u32, height: u32) -> Vec<bool> {
-    if !is_pure_white(region.color) {
+fn suppressed_background_contours(
+    region: &ColorRegion,
+    width: u32,
+    height: u32,
+    config: &TracingConfig,
+) -> Vec<bool> {
+    if !is_background_color(region.color, config) {
         return vec![false; region.contours.len()];
     }
 
@@ -299,12 +313,13 @@ fn suppressed_background_contours(region: &ColorRegion, width: u32, height: u32)
         .collect()
 }
 
-fn is_pure_white(color: PaletteColor) -> bool {
+fn is_background_color(color: PaletteColor, config: &TracingConfig) -> bool {
+    let bg = config.background_color.unwrap_or((255, 255, 255));
     color
         == (PaletteColor {
-            r: 255,
-            g: 255,
-            b: 255,
+            r: bg.0,
+            g: bg.1,
+            b: bg.2,
         })
 }
 
@@ -476,8 +491,22 @@ fn build_path_data_from_indices(
             continue;
         }
 
-        // Check minimum area
-        let area = polygon_area(&simplified);
+        // Convert to float and apply Laplacian smoothing proportional to strength
+        let float_pts: Vec<(f64, f64)> = simplified
+            .iter()
+            .map(|p| (p.x as f64, p.y as f64))
+            .collect();
+        let smoothed = if config.smoothing_strength > 0.01 {
+            // Derive iteration count from strength: low strength => 1 pass,
+            // higher strength => more passes for stronger staircase reduction.
+            let iterations = 1 + (config.smoothing_strength * 2.0).floor() as u32;
+            smooth_closed_contour_multi(&float_pts, config.smoothing_strength * 0.5, iterations)
+        } else {
+            float_pts
+        };
+
+        // Check minimum area using smoothed coordinates
+        let area = polygon_area_f64(&smoothed);
         if area < config.min_region_area {
             result.contours_filtered_min_area += 1;
             continue;
@@ -486,7 +515,7 @@ fn build_path_data_from_indices(
         let geometry = if config.smoothing_strength > 0.01 {
             // Use cubic Bezier curves for smoother output
             build_bezier_path(
-                &simplified,
+                &smoothed,
                 config.smoothing_strength,
                 config.corner_sensitivity,
                 width,
@@ -494,7 +523,7 @@ fn build_path_data_from_indices(
             )
         } else {
             // Use straight line segments
-            build_linear_path(&simplified, width, height)
+            build_linear_path(&smoothed, width, height)
         };
 
         parts.push(geometry.data);
@@ -548,16 +577,16 @@ fn clamp_bezier_to_canvas(bezier: CubicBezier, width: u32, height: u32) -> Cubic
 }
 
 /// Build a path using straight line segments.
-fn build_linear_path(points: &[Point], width: u32, height: u32) -> PathGeometry {
+fn build_linear_path(points: &[(f64, f64)], width: u32, height: u32) -> PathGeometry {
     let mut d = String::new();
-    for (i, p) in points.iter().enumerate() {
+    for (i, &p) in points.iter().enumerate() {
         if i == 0 {
             d.push_str("M ");
         } else {
             d.push_str(" L ");
         }
 
-        let point = clamp_svg_point((p.x as f64, p.y as f64), width, height);
+        let point = clamp_svg_point(p, width, height);
         d.push_str(&format_svg_point(point.0, point.1));
     }
     d.push_str(" Z");
@@ -569,16 +598,17 @@ fn build_linear_path(points: &[Point], width: u32, height: u32) -> PathGeometry 
 
 /// Build a path using cubic Bezier curves.
 fn build_bezier_path(
-    points: &[Point],
+    points: &[(f64, f64)],
     smoothing: f64,
     corner_sensitivity: f64,
     width: u32,
     height: u32,
 ) -> PathGeometry {
-    let beziers: Vec<CubicBezier> = fit_closed_cubic_beziers(points, smoothing, corner_sensitivity)
-        .into_iter()
-        .map(|bezier| clamp_bezier_to_canvas(bezier, width, height))
-        .collect();
+    let beziers: Vec<CubicBezier> =
+        fit_closed_cubic_beziers_f64(points, smoothing, corner_sensitivity)
+            .into_iter()
+            .map(|bezier| clamp_bezier_to_canvas(bezier, width, height))
+            .collect();
     if beziers.is_empty() {
         return build_linear_path(points, width, height);
     }
@@ -615,6 +645,21 @@ fn polygon_area(points: &[Point]) -> f64 {
         let j = (i + 1) % n;
         area += points[i].x as f64 * points[j].y as f64;
         area -= points[j].x as f64 * points[i].y as f64;
+    }
+    (area / 2.0).abs()
+}
+
+/// Calculate the area of a polygon from float coordinates.
+fn polygon_area_f64(points: &[(f64, f64)]) -> f64 {
+    let n = points.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0f64;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += points[i].0 * points[j].1;
+        area -= points[j].0 * points[i].1;
     }
     (area / 2.0).abs()
 }
@@ -826,9 +871,11 @@ mod tests {
 
         let svg = generate_svg(&regions, 8, 8, &config);
 
-        assert!(svg.contains("fill=\"white\""));
+        // Background rect should use the configured color (white by default)
+        assert!(svg.contains("fill=\"#ffffff\""));
         assert!(svg.contains("fill=\"#000000\""));
-        assert!(!svg.contains("fill=\"#ffffff\""));
+        // The redundant white contour touching the border should be suppressed,
+        // so only 1 <path> (the black region) should be emitted.
         assert_eq!(svg.matches("<path").count(), 1);
     }
 
@@ -921,11 +968,7 @@ mod tests {
 
     #[test]
     fn build_linear_path_uses_two_decimal_precision() {
-        let geometry = build_linear_path(
-            &[Point::new(0, 0), Point::new(4, 0), Point::new(4, 4)],
-            4,
-            4,
-        );
+        let geometry = build_linear_path(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0)], 4, 4);
 
         assert_two_decimal_precision(&geometry.data);
         assert!(geometry.data.contains("M 0.00 0.00"));
@@ -935,12 +978,7 @@ mod tests {
     #[test]
     fn build_bezier_path_uses_two_decimal_precision() {
         let geometry = build_bezier_path(
-            &[
-                Point::new(0, 0),
-                Point::new(4, 0),
-                Point::new(4, 4),
-                Point::new(0, 4),
-            ],
+            &[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)],
             0.6,
             0.6,
             4,
@@ -955,12 +993,7 @@ mod tests {
     #[test]
     fn build_bezier_path_clamps_edge_touching_curves_to_canvas_bounds() {
         let geometry = build_bezier_path(
-            &[
-                Point::new(0, 0),
-                Point::new(20, 0),
-                Point::new(20, 20),
-                Point::new(0, 20),
-            ],
+            &[(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)],
             0.8,
             0.0,
             20,

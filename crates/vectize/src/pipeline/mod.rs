@@ -10,7 +10,7 @@
 //! 4. **Contour extraction** – deterministic grid-edge tracing with hole preservation
 //! 5. **Despeckle** – remove tiny contours below the threshold
 //! 6. **Region assembly** – build color regions from contour data
-//! 7. **SVG generation** – simplification, curve fitting, and SVG emission
+//! 7. **SVG generation** – simplification, Laplacian smoothing, curve fitting, and SVG emission
 
 pub mod contour;
 pub mod curves;
@@ -18,6 +18,7 @@ pub mod loader;
 pub mod preprocess;
 pub mod segment;
 pub mod simplify;
+pub mod smooth;
 pub mod svg;
 
 use image::DynamicImage;
@@ -51,8 +52,10 @@ pub fn run_pipeline_with_debug(
     // Stage 1: Preprocessing (normalization, optional denoising)
     let preprocessed = preprocess::preprocess(img, config);
 
-    // Stage 2: Composite transparency against white
-    let composited = preprocess::composite_against_white(&preprocessed, config.alpha_threshold);
+    // Stage 2: Composite transparency against the configured background color
+    let bg = config.background_color.unwrap_or((255, 255, 255));
+    let composited =
+        preprocess::composite_against_background(&preprocessed, config.alpha_threshold, bg);
 
     // Stage 3: Color quantization / segmentation
     debug!(

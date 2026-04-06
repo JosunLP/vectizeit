@@ -27,6 +27,7 @@ impl QualityPreset {
                 enable_denoising: false,
                 enable_preprocessing: true,
                 quality_preset: QualityPreset::Fast,
+                background_color: None,
             },
             QualityPreset::Balanced => TracingConfig::default(),
             QualityPreset::High => TracingConfig {
@@ -40,6 +41,7 @@ impl QualityPreset {
                 enable_denoising: true,
                 enable_preprocessing: true,
                 quality_preset: QualityPreset::High,
+                background_color: None,
             },
         }
     }
@@ -88,6 +90,9 @@ pub struct TracingConfig {
     pub enable_preprocessing: bool,
     /// The quality preset this config was derived from (if any).
     pub quality_preset: QualityPreset,
+    /// Background color for alpha compositing and redundant-region suppression.
+    /// `None` means white (255, 255, 255).
+    pub background_color: Option<(u8, u8, u8)>,
 }
 
 impl Default for TracingConfig {
@@ -103,6 +108,7 @@ impl Default for TracingConfig {
             enable_denoising: false,
             enable_preprocessing: true,
             quality_preset: QualityPreset::Balanced,
+            background_color: None,
         }
     }
 }

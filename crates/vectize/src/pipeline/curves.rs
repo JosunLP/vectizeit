@@ -28,16 +28,15 @@ pub fn fit_cubic_beziers(
     fit_cubic_beziers_impl(points, smoothing, corner_sensitivity, false)
 }
 
-pub(crate) fn fit_closed_cubic_beziers(
-    points: &[Point],
+pub(crate) fn fit_closed_cubic_beziers_f64(
+    points: &[(f64, f64)],
     smoothing: f64,
     corner_sensitivity: f64,
 ) -> Vec<CubicBezier> {
     if points.len() < 3 {
-        return fit_cubic_beziers(points, smoothing, corner_sensitivity);
+        return Vec::new();
     }
-
-    fit_cubic_beziers_impl(points, smoothing, corner_sensitivity, true)
+    fit_beziers_core(points, smoothing, corner_sensitivity, true)
 }
 
 fn fit_cubic_beziers_impl(
@@ -46,13 +45,22 @@ fn fit_cubic_beziers_impl(
     corner_sensitivity: f64,
     closed: bool,
 ) -> Vec<CubicBezier> {
-    if points.len() < 2 {
+    let pts: Vec<(f64, f64)> = points.iter().map(|p| (p.x as f64, p.y as f64)).collect();
+    fit_beziers_core(&pts, smoothing, corner_sensitivity, closed)
+}
+
+fn fit_beziers_core(
+    pts: &[(f64, f64)],
+    smoothing: f64,
+    corner_sensitivity: f64,
+    closed: bool,
+) -> Vec<CubicBezier> {
+    let n = pts.len();
+    if n < 2 {
         return Vec::new();
     }
 
     let tension = smoothing.clamp(0.0, 1.0) * 0.4;
-    let pts: Vec<(f64, f64)> = points.iter().map(|p| (p.x as f64, p.y as f64)).collect();
-    let n = pts.len();
 
     if !closed && n == 2 {
         // Single straight segment
@@ -66,9 +74,9 @@ fn fit_cubic_beziers_impl(
 
     // Detect corners based on angle between consecutive segments
     let corners = if closed {
-        detect_closed_corners(&pts, corner_sensitivity)
+        detect_closed_corners(pts, corner_sensitivity)
     } else {
-        detect_corners(&pts, corner_sensitivity)
+        detect_corners(pts, corner_sensitivity)
     };
 
     let mut segments = Vec::new();
@@ -263,14 +271,9 @@ mod tests {
 
     #[test]
     fn closed_square_produces_one_segment_per_edge() {
-        let pts = vec![
-            Point::new(0, 0),
-            Point::new(10, 0),
-            Point::new(10, 10),
-            Point::new(0, 10),
-        ];
+        let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
 
-        let beziers = fit_closed_cubic_beziers(&pts, 0.5, 0.6);
+        let beziers = fit_closed_cubic_beziers_f64(&pts, 0.5, 0.6);
 
         assert_eq!(beziers.len(), 4);
         assert_eq!(beziers.first().unwrap().p0, (0.0, 0.0));
@@ -287,14 +290,9 @@ mod tests {
 
     #[test]
     fn closed_square_corner_handles_stay_within_edges() {
-        let pts = vec![
-            Point::new(0, 0),
-            Point::new(10, 0),
-            Point::new(10, 10),
-            Point::new(0, 10),
-        ];
+        let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
 
-        let beziers = fit_closed_cubic_beziers(&pts, 0.6, 0.6);
+        let beziers = fit_closed_cubic_beziers_f64(&pts, 0.6, 0.6);
 
         for bezier in &beziers {
             for (x, y) in [bezier.p0, bezier.p1, bezier.p2, bezier.p3] {

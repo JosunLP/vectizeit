@@ -85,29 +85,42 @@ fn gaussian_blur(
     dst
 }
 
-/// Composite an RGBA image against a white background for pixels below the alpha threshold.
-pub fn composite_against_white(
+/// Composite an RGBA image against a solid background color for pixels below the alpha threshold.
+///
+/// The `bg` tuple specifies the (R, G, B) background color used for transparent
+/// pixels and alpha blending.
+pub fn composite_against_background(
     src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     alpha_threshold: u8,
+    bg: (u8, u8, u8),
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let (width, height) = src.dimensions();
     let mut dst = ImageBuffer::new(width, height);
+    let (bg_r, bg_g, bg_b) = (bg.0 as f32, bg.1 as f32, bg.2 as f32);
 
     for (x, y, px) in src.enumerate_pixels() {
         let [r, g, b, a] = px.0;
         if a < alpha_threshold {
-            dst.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            dst.put_pixel(x, y, Rgba([bg.0, bg.1, bg.2, 255]));
         } else {
-            // Alpha-blend over white
+            // Alpha-blend over the background color
             let alpha = a as f32 / 255.0;
-            let nr = ((r as f32 * alpha) + (255.0 * (1.0 - alpha))) as u8;
-            let ng = ((g as f32 * alpha) + (255.0 * (1.0 - alpha))) as u8;
-            let nb = ((b as f32 * alpha) + (255.0 * (1.0 - alpha))) as u8;
+            let nr = ((r as f32 * alpha) + (bg_r * (1.0 - alpha))) as u8;
+            let ng = ((g as f32 * alpha) + (bg_g * (1.0 - alpha))) as u8;
+            let nb = ((b as f32 * alpha) + (bg_b * (1.0 - alpha))) as u8;
             dst.put_pixel(x, y, Rgba([nr, ng, nb, 255]));
         }
     }
 
     dst
+}
+
+/// Composite an RGBA image against a white background for pixels below the alpha threshold.
+pub fn composite_against_white(
+    src: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    alpha_threshold: u8,
+) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    composite_against_background(src, alpha_threshold, (255, 255, 255))
 }
 
 #[cfg(test)]
