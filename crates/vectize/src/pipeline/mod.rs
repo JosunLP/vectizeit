@@ -83,10 +83,7 @@ pub fn run_pipeline(img: &DynamicImage, config: &TracingConfig) -> Result<String
 ///
 /// The perimeter is approximated as the number of points in the contour
 /// (i.e., the boundary pixel count, which is a good proxy for small speckles).
-fn despeckle(
-    contour_groups: Vec<(u8, Vec<Contour>)>,
-    threshold: f64,
-) -> Vec<(u8, Vec<Contour>)> {
+fn despeckle(contour_groups: Vec<(u8, Vec<Contour>)>, threshold: f64) -> Vec<(u8, Vec<Contour>)> {
     if threshold <= 0.0 {
         return contour_groups;
     }
