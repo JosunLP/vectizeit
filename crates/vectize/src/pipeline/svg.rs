@@ -37,6 +37,12 @@ struct PathBuildResult {
     points_emitted: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PathGeometry {
+    data: String,
+    emitted_points: usize,
+}
+
 /// Generate an SVG document from color regions.
 pub fn generate_svg(
     regions: &[ColorRegion],
@@ -116,7 +122,7 @@ fn build_path_data(contours: &[Contour], config: &TracingConfig) -> PathBuildRes
             continue;
         }
 
-        let path = if config.smoothing_strength > 0.01 {
+        let geometry = if config.smoothing_strength > 0.01 {
             // Use cubic Bezier curves for smoother output
             build_bezier_path(
                 &simplified,
@@ -128,9 +134,9 @@ fn build_path_data(contours: &[Contour], config: &TracingConfig) -> PathBuildRes
             build_linear_path(&simplified)
         };
 
-        parts.push(path);
+        parts.push(geometry.data);
         result.contours_emitted += 1;
-        result.points_emitted += simplified.len();
+        result.points_emitted += geometry.emitted_points;
         if contour_is_hole(&simplified) {
             result.holes_emitted += 1;
         }
@@ -141,7 +147,7 @@ fn build_path_data(contours: &[Contour], config: &TracingConfig) -> PathBuildRes
 }
 
 /// Build a path using straight line segments.
-fn build_linear_path(points: &[Point]) -> String {
+fn build_linear_path(points: &[Point]) -> PathGeometry {
     let mut d = String::new();
     for (i, p) in points.iter().enumerate() {
         if i == 0 {
@@ -151,11 +157,14 @@ fn build_linear_path(points: &[Point]) -> String {
         }
     }
     d.push_str(" Z");
-    d
+    PathGeometry {
+        data: d,
+        emitted_points: points.len(),
+    }
 }
 
 /// Build a path using cubic Bezier curves.
-fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) -> String {
+fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) -> PathGeometry {
     let beziers = fit_cubic_beziers(points, smoothing, corner_sensitivity);
     if beziers.is_empty() {
         return build_linear_path(points);
@@ -171,7 +180,10 @@ fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) 
         ));
     }
     d.push_str(" Z");
-    d
+    PathGeometry {
+        data: d,
+        emitted_points: 1 + (beziers.len() * 3),
+    }
 }
 
 /// Calculate the signed area of a polygon using the shoelace formula.
@@ -272,5 +284,30 @@ mod tests {
         assert_eq!(result.metrics.contours_emitted, 2);
         assert_eq!(result.metrics.holes_emitted, 1);
         assert_eq!(result.metrics.points_emitted, 8);
+    }
+
+    #[test]
+    fn generate_svg_with_metrics_counts_bezier_control_points() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.6,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![vec![
+                Point::new(0, 0),
+                Point::new(4, 0),
+                Point::new(4, 4),
+                Point::new(0, 4),
+            ]],
+        }];
+
+        let result = generate_svg_with_metrics(&regions, 4, 4, &config);
+        assert!(result.svg.contains(" C "));
+        assert_eq!(result.metrics.regions_emitted, 1);
+        assert_eq!(result.metrics.contours_emitted, 1);
+        assert_eq!(result.metrics.points_emitted, 10);
     }
 }

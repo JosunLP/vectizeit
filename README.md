@@ -65,12 +65,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **71 automated tests** across three categories:
+The project includes **73 automated tests** across three categories:
 
 | Category | Location | Tests |
 |----------|----------|-------|
-| Unit tests | Embedded in each module (`#[cfg(test)]`) | 28 |
-| Integration tests | `crates/vectize/tests/integration_tests.rs` | 25 |
+| Unit tests | Embedded in each module (`#[cfg(test)]`) | 29 |
+| Integration tests | `crates/vectize/tests/integration_tests.rs` | 26 |
 | CLI smoke tests | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17 |
 | Doc tests | `crates/vectize/src/lib.rs` | 1 |
 

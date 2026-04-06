@@ -215,6 +215,44 @@ fn trace_bytes_ring_image_preserves_hole() {
 }
 
 #[test]
+fn trace_bytes_result_reports_bezier_emitted_points() {
+    let img = ImageBuffer::from_fn(12, 12, |x, y| {
+        if (2..=9).contains(&x) && (2..=9).contains(&y) {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.6,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let tracer = Tracer::new(config);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+    let expected_emitted_points = result.svg().matches("M ").count()
+        + result.svg().matches(" L ").count()
+        + (result.svg().matches(" C ").count() * 3);
+
+    assert!(result.svg().contains(" C "));
+    assert!(metrics.contours_emitted() >= 1);
+    assert_eq!(metrics.points_emitted(), expected_emitted_points);
+}
+
+#[test]
 fn tracing_result_can_write_svg() {
     let img = make_solid_image(6, 6, Rgba([80, 90, 100, 255]));
     let bytes = encode_png(&img);

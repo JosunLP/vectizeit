@@ -159,7 +159,8 @@ impl TraceStageMetrics {
         self.holes_emitted
     }
 
-    /// Return the total emitted point count after simplification.
+    /// Return the total coordinate point count emitted into final SVG path data
+    /// after simplification and optional smoothing.
     pub fn points_emitted(&self) -> usize {
         self.points_emitted
     }
