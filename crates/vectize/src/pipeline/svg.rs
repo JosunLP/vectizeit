@@ -5,7 +5,7 @@
 
 use crate::config::TracingConfig;
 use crate::pipeline::contour::{contour_is_hole, Contour, Point};
-use crate::pipeline::curves::fit_cubic_beziers;
+use crate::pipeline::curves::fit_closed_cubic_beziers;
 use crate::pipeline::segment::PaletteColor;
 use crate::pipeline::simplify::simplify;
 
@@ -165,7 +165,7 @@ fn build_linear_path(points: &[Point]) -> PathGeometry {
 
 /// Build a path using cubic Bezier curves.
 fn build_bezier_path(points: &[Point], smoothing: f64, corner_sensitivity: f64) -> PathGeometry {
-    let beziers = fit_cubic_beziers(points, smoothing, corner_sensitivity);
+    let beziers = fit_closed_cubic_beziers(points, smoothing, corner_sensitivity);
     if beziers.is_empty() {
         return build_linear_path(points);
     }
@@ -308,8 +308,9 @@ mod tests {
 
         let result = generate_svg_with_metrics(&regions, 4, 4, &config);
         assert!(result.svg.contains(" C "));
+        assert_eq!(result.svg.matches(" C ").count(), 4);
         assert_eq!(result.metrics.regions_emitted, 1);
         assert_eq!(result.metrics.contours_emitted, 1);
-        assert_eq!(result.metrics.points_emitted, 10);
+        assert_eq!(result.metrics.points_emitted, 13);
     }
 }

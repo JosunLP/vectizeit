@@ -253,6 +253,35 @@ fn trace_bytes_result_reports_bezier_emitted_points() {
 }
 
 #[test]
+fn trace_bytes_result_uses_closed_beziers_for_closed_contours() {
+    let img = make_solid_image(1, 1, Rgba([0, 0, 0, 255]));
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.6,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+    };
+
+    let tracer = Tracer::new(config);
+    let result = tracer.trace_bytes_result(&bytes).unwrap();
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+
+    assert_eq!(result.svg().matches(" C ").count(), 4);
+    assert_eq!(metrics.contours_emitted(), 1);
+    assert_eq!(metrics.points_emitted(), 13);
+}
+
+#[test]
 fn tracing_result_can_write_svg() {
     let img = make_solid_image(6, 6, Rgba([80, 90, 100, 255]));
     let bytes = encode_png(&img);
@@ -338,41 +367,68 @@ fn config_validation_comprehensive() {
     assert!(QualityPreset::High.to_config().validate().is_ok());
 
     // Invalid: color_count too low
-    let mut cfg = TracingConfig::default();
-    cfg.color_count = 0;
+    let cfg = TracingConfig {
+        color_count: 0,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
 
-    cfg.color_count = 1;
+    let cfg = TracingConfig {
+        color_count: 1,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
 
-    cfg.color_count = 256;
+    let cfg = TracingConfig {
+        color_count: 256,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_ok());
 
-    cfg.color_count = 257;
+    let cfg = TracingConfig {
+        color_count: 257,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
 
     // Invalid: negative tolerance
-    let mut cfg = TracingConfig::default();
-    cfg.simplification_tolerance = -0.1;
+    let cfg = TracingConfig {
+        simplification_tolerance: -0.1,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
 
     // Invalid: negative min_region_area
-    let mut cfg = TracingConfig::default();
-    cfg.min_region_area = -1.0;
+    let cfg = TracingConfig {
+        min_region_area: -1.0,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
 
     // Invalid: smoothing out of range
-    let mut cfg = TracingConfig::default();
-    cfg.smoothing_strength = 1.5;
+    let cfg = TracingConfig {
+        smoothing_strength: 1.5,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
-    cfg.smoothing_strength = -0.1;
+
+    let cfg = TracingConfig {
+        smoothing_strength: -0.1,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
 
     // Invalid: corner sensitivity out of range
-    let mut cfg = TracingConfig::default();
-    cfg.corner_sensitivity = 2.0;
+    let cfg = TracingConfig {
+        corner_sensitivity: 2.0,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
-    cfg.corner_sensitivity = -0.1;
+
+    let cfg = TracingConfig {
+        corner_sensitivity: -0.1,
+        ..TracingConfig::default()
+    };
     assert!(cfg.validate().is_err());
 }
 
@@ -517,8 +573,10 @@ fn large_color_count() {
     let img = make_solid_image(8, 8, Rgba([128, 64, 32, 255]));
     let bytes = encode_png(&img);
 
-    let mut config = TracingConfig::default();
-    config.color_count = 256; // maximum
+    let config = TracingConfig {
+        color_count: 256, // maximum
+        ..TracingConfig::default()
+    };
     let tracer = Tracer::new(config);
     let svg = tracer.trace_bytes(&bytes).unwrap();
     assert!(svg.contains("<svg"));
@@ -529,8 +587,10 @@ fn no_smoothing() {
     let img = make_solid_image(16, 16, Rgba([200, 100, 50, 255]));
     let bytes = encode_png(&img);
 
-    let mut config = TracingConfig::default();
-    config.smoothing_strength = 0.0;
+    let config = TracingConfig {
+        smoothing_strength: 0.0,
+        ..TracingConfig::default()
+    };
     let tracer = Tracer::new(config);
     let svg = tracer.trace_bytes(&bytes).unwrap();
 
@@ -544,8 +604,10 @@ fn denoising_enabled() {
     let img = make_solid_image(16, 16, Rgba([100, 100, 100, 255]));
     let bytes = encode_png(&img);
 
-    let mut config = TracingConfig::default();
-    config.enable_denoising = true;
+    let config = TracingConfig {
+        enable_denoising: true,
+        ..TracingConfig::default()
+    };
     let tracer = Tracer::new(config);
     let svg = tracer.trace_bytes(&bytes).unwrap();
     assert!(svg.contains("<svg"));
@@ -556,8 +618,10 @@ fn preprocessing_disabled() {
     let img = make_solid_image(16, 16, Rgba([100, 100, 100, 255]));
     let bytes = encode_png(&img);
 
-    let mut config = TracingConfig::default();
-    config.enable_preprocessing = false;
+    let config = TracingConfig {
+        enable_preprocessing: false,
+        ..TracingConfig::default()
+    };
     let tracer = Tracer::new(config);
     let svg = tracer.trace_bytes(&bytes).unwrap();
     assert!(svg.contains("<svg"));

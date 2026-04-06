@@ -12,7 +12,7 @@
 //! 3. **Segmentation** – reduce colors via median-cut quantization
 //! 4. **Contour extraction** – trace deterministic grid-edge loops with hole preservation
 //! 5. **Simplification** – reduce polygon complexity with Ramer-Douglas-Peucker
-//! 6. **Curve fitting** – smooth polylines with cubic Bezier splines
+//! 6. **Curve fitting** – smooth closed contours with cubic Bezier splines
 //! 7. **SVG generation** – emit clean, valid SVG markup
 //!
 //! ## Quick Start
@@ -136,8 +136,10 @@ mod tests {
 
     #[test]
     fn config_validation_rejects_zero_colors() {
-        let mut config = TracingConfig::default();
-        config.color_count = 1;
+        let config = TracingConfig {
+            color_count: 1,
+            ..TracingConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 

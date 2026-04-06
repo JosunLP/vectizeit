@@ -10,7 +10,7 @@ fitting and SVG emission.
 
 ## Repository Layout
 
-```
+```bash
 vectizeit/
 ├── Cargo.toml                  # Workspace manifest
 ├── crates/
@@ -30,7 +30,7 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (25 tests)
+│   │       └── integration_tests.rs  # API & golden tests (27 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
@@ -65,16 +65,17 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **73 automated tests** across three categories:
+The project includes **76 automated tests** across four categories:
 
-| Category | Location | Tests |
-|----------|----------|-------|
-| Unit tests | Embedded in each module (`#[cfg(test)]`) | 29 |
-| Integration tests | `crates/vectize/tests/integration_tests.rs` | 26 |
-| CLI smoke tests | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17 |
-| Doc tests | `crates/vectize/src/lib.rs` | 1 |
+| Category          | Location                                      | Tests |
+| ----------------- | --------------------------------------------- | ----- |
+| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 31    |
+| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 27    |
+| CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17    |
+| Doc tests         | `crates/vectize/src/lib.rs`                   | 1     |
 
 Test types include:
+
 - **API integration tests** – end-to-end tracing from bytes and files
 - **Configuration validation** – all presets and error cases
 - **Golden / snapshot tests** – deterministic output verification
@@ -235,52 +236,52 @@ if let Err(msg) = config.validate() {
 
 The library processes images in seven sequential stages:
 
-| Stage | Module | Description |
-|-------|--------|-------------|
-| 1. Load | `pipeline::loader` | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header. |
-| 2. Preprocess | `pipeline::preprocess` | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background. |
-| 3. Segment | `pipeline::segment` | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space. |
-| 4. Contour | `pipeline::contour` | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. |
-| 5. Despeckle | `pipeline::mod` | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles. |
-| 6. Simplify | `pipeline::simplify` | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness. |
-| 7. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth polylines into **cubic Bezier splines** using Catmull-Rom tangents with **corner detection** (`corner_sensitivity`), then emit valid SVG markup with proper `viewBox`, `<path>` elements, and a white background rectangle. |
+| Stage           | Module                              | Description                                                                                                                                                                                                                                          |
+| --------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Load         | `pipeline::loader`                  | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header.                                                                                                                                  |
+| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background.                                                     |
+| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space.                                                                                                      |
+| 4. Contour      | `pipeline::contour`                 | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding.                                                                                                                                     |
+| 5. Despeckle    | `pipeline::mod`                     | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles.                                                                                                                                    |
+| 6. Simplify     | `pipeline::simplify`                | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness.                                                                                                           |
+| 7. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Smooth closed contours into **cubic Bezier splines** using Catmull-Rom tangents with **wrap-around corner detection** (`corner_sensitivity`), then emit valid SVG markup with proper `viewBox`, `<path>` elements, and a white background rectangle. |
 
 ---
 
 ## Configuration Reference
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `color_count` | `u16` | `16` | Number of palette colors (2–256) |
-| `simplification_tolerance` | `f64` | `1.0` | RDP tolerance in pixels |
-| `min_region_area` | `f64` | `4.0` | Minimum polygon area to include |
-| `smoothing_strength` | `f64` | `0.5` | Bezier smoothing (0 = straight lines) |
-| `corner_sensitivity` | `f64` | `0.6` | Corner preservation threshold |
-| `alpha_threshold` | `u8` | `128` | Pixels below this alpha are transparent |
-| `despeckle_threshold` | `f64` | `2.0` | Minimum contour perimeter |
-| `enable_denoising` | `bool` | `false` | Apply Gaussian blur before tracing |
-| `enable_preprocessing` | `bool` | `true` | Enable normalization stage |
+| Field                      | Type   | Default | Description                             |
+| -------------------------- | ------ | ------- | --------------------------------------- |
+| `color_count`              | `u16`  | `16`    | Number of palette colors (2–256)        |
+| `simplification_tolerance` | `f64`  | `1.0`   | RDP tolerance in pixels                 |
+| `min_region_area`          | `f64`  | `4.0`   | Minimum polygon area to include         |
+| `smoothing_strength`       | `f64`  | `0.5`   | Bezier smoothing (0 = straight lines)   |
+| `corner_sensitivity`       | `f64`  | `0.6`   | Corner preservation threshold           |
+| `alpha_threshold`          | `u8`   | `128`   | Pixels below this alpha are transparent |
+| `despeckle_threshold`      | `f64`  | `2.0`   | Minimum contour perimeter               |
+| `enable_denoising`         | `bool` | `false` | Apply Gaussian blur before tracing      |
+| `enable_preprocessing`     | `bool` | `true`  | Enable normalization stage              |
 
 ### Quality Presets
 
-| Preset | Colors | Tolerance | Denoising | Use case |
-|--------|--------|-----------|-----------|----------|
-| `fast` | 8 | 2.0 | off | Quick previews, low detail |
-| `balanced` | 16 | 1.0 | off | General-purpose (default) |
-| `high` | 32 | 0.3 | on | Maximum fidelity |
+| Preset     | Colors | Tolerance | Denoising | Use case                   |
+| ---------- | ------ | --------- | --------- | -------------------------- |
+| `fast`     | 8      | 2.0       | off       | Quick previews, low detail |
+| `balanced` | 16     | 1.0       | off       | General-purpose (default)  |
+| `high`     | 32     | 0.3       | on        | Maximum fidelity           |
 
 ---
 
 ## Dependency Choices
 
-| Crate | Reason |
-|-------|--------|
-| [`image`](https://crates.io/crates/image) | De facto standard Rust image I/O; handles PNG, JPEG, and WebP decoding with a unified API. |
-| [`thiserror`](https://crates.io/crates/thiserror) | Generates `Display` and `Error` impls for the error enum with minimal boilerplate. |
-| [`log`](https://crates.io/crates/log) | Logging facade — keeps the library decoupled from any specific logger backend. |
-| [`rayon`](https://crates.io/crates/rayon) | Work-stealing parallel iterator library; declared for future parallelization of per-region processing. |
-| [`clap`](https://crates.io/crates/clap) (CLI only) | Industry-standard argument parsing with derive macros for clean, self-documenting CLI definitions. |
-| [`env_logger`](https://crates.io/crates/env_logger) (CLI only) | Simple `RUST_LOG`-driven logger backend for the CLI binary. |
+| Crate                                                          | Reason                                                                                                 |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| [`image`](https://crates.io/crates/image)                      | De facto standard Rust image I/O; handles PNG, JPEG, and WebP decoding with a unified API.             |
+| [`thiserror`](https://crates.io/crates/thiserror)              | Generates `Display` and `Error` impls for the error enum with minimal boilerplate.                     |
+| [`log`](https://crates.io/crates/log)                          | Logging facade — keeps the library decoupled from any specific logger backend.                         |
+| [`rayon`](https://crates.io/crates/rayon)                      | Work-stealing parallel iterator library; declared for future parallelization of per-region processing. |
+| [`clap`](https://crates.io/crates/clap) (CLI only)             | Industry-standard argument parsing with derive macros for clean, self-documenting CLI definitions.     |
+| [`env_logger`](https://crates.io/crates/env_logger) (CLI only) | Simple `RUST_LOG`-driven logger backend for the CLI binary.                                            |
 
 ---
 
