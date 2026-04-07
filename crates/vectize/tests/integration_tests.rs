@@ -603,8 +603,8 @@ fn trace_bytes_ring_image_preserves_hole() {
 
 #[test]
 fn trace_bytes_result_reports_bezier_emitted_points() {
-    let img = ImageBuffer::from_fn(12, 12, |x, y| {
-        if (2..=9).contains(&x) && (2..=9).contains(&y) {
+    let img = ImageBuffer::from_fn(24, 24, |x, y| {
+        if (4..=19).contains(&x) && (4..=19).contains(&y) {
             Rgba([0, 0, 0, 255])
         } else {
             Rgba([255, 255, 255, 255])
@@ -642,7 +642,7 @@ fn trace_bytes_result_reports_bezier_emitted_points() {
 
 #[test]
 fn trace_bytes_result_uses_closed_beziers_for_closed_contours() {
-    let img = make_solid_image(1, 1, Rgba([0, 0, 0, 255]));
+    let img = make_solid_image(20, 20, Rgba([0, 0, 0, 255]));
     let bytes = encode_png(&img);
 
     let config = TracingConfig {
@@ -675,7 +675,7 @@ fn trace_bytes_result_uses_closed_beziers_for_closed_contours() {
     assert_eq!(metrics.contours_suppressed_background(), 0);
     assert!(!path_numbers.is_empty());
     assert!(
-        path_numbers.iter().all(|value| (0.0..=1.0).contains(value)),
+        path_numbers.iter().all(|value| (0.0..=20.0).contains(value)),
         "smoothed coordinates must stay inside the viewBox, got {path_numbers:?}"
     );
 }

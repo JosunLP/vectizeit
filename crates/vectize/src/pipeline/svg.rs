@@ -42,6 +42,7 @@ struct PathBuildResult {
     points_emitted: usize,
     contours_simplified_away: usize,
     contours_filtered_min_area: usize,
+    seam_stroke_width_centi_px: u8,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -54,6 +55,14 @@ struct RegionBuildResult {
 struct PathGeometry {
     data: String,
     emitted_points: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ContourGeometryProfile {
+    smoothing_strength: f64,
+    corner_sensitivity: f64,
+    seam_stroke_width_centi_px: u8,
+    prefer_linear: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -84,6 +93,16 @@ struct ContourBounds {
 }
 
 const SVG_COORD_PRECISION: usize = 2;
+const THIN_CONTOUR_THICKNESS_PX: f64 = 2.5;
+const LINEAR_CONTOUR_THICKNESS_PX: f64 = 5.5;
+const FULL_SMOOTHING_THICKNESS_PX: f64 = 10.0;
+const MIN_THIN_CONTOUR_SMOOTHING_FACTOR: f64 = 0.08;
+const MIN_SEAM_STROKE_THICKNESS_PX: f64 = 4.5;
+const FULL_SEAM_STROKE_THICKNESS_PX: f64 = 12.0;
+const MIN_SEAM_STROKE_CENTI_PX: f64 = 8.0;
+const MAX_SEAM_STROKE_CENTI_PX: f64 = 20.0;
+const OUTLINE_COLOR_LUMA_MAX: f64 = 42.0;
+const OUTLINE_COLOR_CHROMA_MAX: u8 = 20;
 
 /// Generate an SVG document from color regions.
 pub fn generate_svg(
@@ -123,7 +142,7 @@ pub(crate) fn generate_svg_with_trace_space(
     // SVG header
     svg.push_str(&format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="{output_width}" height="{output_height}" viewBox="0 0 {output_width} {output_height}">
+<svg xmlns="http://www.w3.org/2000/svg" width="{output_width}" height="{output_height}" viewBox="0 0 {output_width} {output_height}" shape-rendering="geometricPrecision">
 "#
     ));
 
@@ -158,8 +177,14 @@ pub(crate) fn generate_svg_with_trace_space(
                 continue;
             }
 
+            let seam_stroke = seam_stroke_attributes(
+                region.color,
+                path_result.seam_stroke_width_centi_px,
+                config,
+            );
+
             svg.push_str(&format!(
-                r#"  <path fill="{hex}" fill-rule="evenodd" stroke="none" d="{path_data}"/>
+                r#"  <path fill="{hex}" fill-rule="evenodd"{seam_stroke} d="{path_data}"/>
 "#,
                 path_data = path_result.data
             ));
@@ -213,6 +238,7 @@ fn build_region_paths(
             .into_iter()
             .map(|contour_indices| {
                 build_path_data_from_indices(
+                    region.color,
                     &region.contours,
                     &contour_indices,
                     output_width,
@@ -493,6 +519,7 @@ fn point_in_polygon(contour: &Contour, point: (f64, f64)) -> bool {
 }
 
 fn build_path_data_from_indices(
+    region_color: PaletteColor,
     contours: &[Contour],
     contour_indices: &[usize],
     output_width: u32,
@@ -525,21 +552,26 @@ fn build_path_data_from_indices(
             .iter()
             .map(|p| (p.x as f64 * coordinate_scale, p.y as f64 * coordinate_scale))
             .collect();
-        let smoothed = if config.smoothing_strength > 0.01 {
+        let profile = contour_geometry_profile(&float_pts, config);
+        let smoothed = if profile.smoothing_strength > 0.01 {
             // Derive iteration count from strength: low strength => 1 pass,
             // higher strength => more passes for stronger staircase reduction.
-            let iterations = 1 + (config.smoothing_strength * 2.0).floor() as u32;
+            let iterations = 1 + (profile.smoothing_strength * 2.0).floor() as u32;
             smooth_closed_contour_adaptive_multi(
                 &float_pts,
-                config.smoothing_strength * 0.5,
+                profile.smoothing_strength * 0.5,
                 iterations,
-                config.corner_sensitivity,
+                profile.corner_sensitivity,
             )
         } else {
             float_pts
         };
 
-        let regularized = regularize_contour_geometry(&smoothed, config);
+        let regularized = regularize_contour_geometry(
+            &smoothed,
+            config.simplification_tolerance,
+            profile.smoothing_strength,
+        );
         if regularized.len() < 3 {
             result.contours_simplified_away += 1;
             continue;
@@ -552,23 +584,32 @@ fn build_path_data_from_indices(
             continue;
         }
 
-        let geometry = if config.smoothing_strength > 0.01 {
+        let geometry = if profile.prefer_linear || profile.smoothing_strength <= 0.01 {
+            // Preserve narrow outline-like regions with straight segments.
+            build_linear_path(&regularized, output_width, output_height)
+        } else {
             // Use cubic Bezier curves for smoother output
             build_bezier_path(
                 &regularized,
-                config.smoothing_strength,
-                config.corner_sensitivity,
+                profile.smoothing_strength,
+                profile.corner_sensitivity,
                 output_width,
                 output_height,
             )
-        } else {
-            // Use straight line segments
-            build_linear_path(&regularized, output_width, output_height)
         };
 
         parts.push(geometry.data);
         result.contours_emitted += 1;
         result.points_emitted += geometry.emitted_points;
+        if !contour_is_hole(&simplified) {
+            result.seam_stroke_width_centi_px =
+                result
+                    .seam_stroke_width_centi_px
+                    .max(effective_seam_stroke_width_centi_px(
+                        region_color,
+                        profile.seam_stroke_width_centi_px,
+                    ));
+        }
         if contour_is_hole(&simplified) {
             result.holes_emitted += 1;
         }
@@ -578,15 +619,17 @@ fn build_path_data_from_indices(
     result
 }
 
-fn regularize_contour_geometry(points: &[(f64, f64)], config: &TracingConfig) -> Vec<(f64, f64)> {
-    if points.len() < 8
-        || config.smoothing_strength <= 0.01
-        || config.simplification_tolerance <= 0.0
-    {
+fn regularize_contour_geometry(
+    points: &[(f64, f64)],
+    simplification_tolerance: f64,
+    smoothing_strength: f64,
+) -> Vec<(f64, f64)> {
+    if points.len() < 8 || smoothing_strength <= 0.01 || simplification_tolerance <= 0.0 {
         return points.to_vec();
     }
 
-    let tolerance = post_smoothing_simplification_tolerance(config);
+    let tolerance =
+        post_smoothing_simplification_tolerance(simplification_tolerance, smoothing_strength);
     if tolerance <= 0.0 {
         return points.to_vec();
     }
@@ -608,13 +651,138 @@ fn trace_space_simplification_tolerance(config: &TracingConfig, coordinate_scale
     base / coordinate_scale
 }
 
-fn post_smoothing_simplification_tolerance(config: &TracingConfig) -> f64 {
-    let base = config.simplification_tolerance.max(0.0);
+fn contour_geometry_profile(
+    points: &[(f64, f64)],
+    config: &TracingConfig,
+) -> ContourGeometryProfile {
+    let thickness = contour_visual_thickness(points);
+    let smoothing_factor = remap_clamped(
+        thickness,
+        THIN_CONTOUR_THICKNESS_PX,
+        FULL_SMOOTHING_THICKNESS_PX,
+        MIN_THIN_CONTOUR_SMOOTHING_FACTOR,
+        1.0,
+    );
+    let line_like_factor = 1.0
+        - remap_clamped(
+            thickness,
+            THIN_CONTOUR_THICKNESS_PX,
+            FULL_SMOOTHING_THICKNESS_PX,
+            0.0,
+            1.0,
+        );
+
+    ContourGeometryProfile {
+        smoothing_strength: config.smoothing_strength * smoothing_factor,
+        corner_sensitivity: (config.corner_sensitivity
+            + ((1.0 - config.corner_sensitivity) * line_like_factor * 0.9))
+            .clamp(0.0, 1.0),
+        seam_stroke_width_centi_px: seam_stroke_width_centi_px(
+            thickness,
+            config.smoothing_strength,
+        ),
+        prefer_linear: thickness <= LINEAR_CONTOUR_THICKNESS_PX,
+    }
+}
+
+fn effective_seam_stroke_width_centi_px(color: PaletteColor, seam_stroke_width_centi_px: u8) -> u8 {
+    if seam_stroke_width_centi_px == 0 || is_outline_like_color(color) {
+        0
+    } else {
+        seam_stroke_width_centi_px
+    }
+}
+
+fn seam_stroke_width_centi_px(thickness: f64, smoothing_strength: f64) -> u8 {
+    if smoothing_strength <= 0.01 || thickness <= MIN_SEAM_STROKE_THICKNESS_PX {
+        return 0;
+    }
+
+    remap_clamped(
+        thickness,
+        MIN_SEAM_STROKE_THICKNESS_PX,
+        FULL_SEAM_STROKE_THICKNESS_PX,
+        MIN_SEAM_STROKE_CENTI_PX,
+        MAX_SEAM_STROKE_CENTI_PX,
+    )
+    .round()
+    .clamp(0.0, u8::MAX as f64) as u8
+}
+
+fn seam_stroke_attributes(
+    color: PaletteColor,
+    seam_stroke_width_centi_px: u8,
+    config: &TracingConfig,
+) -> String {
+    if effective_seam_stroke_width_centi_px(color, seam_stroke_width_centi_px) == 0
+        || is_background_color(color, config)
+    {
+        return String::from(r#" stroke="none""#);
+    }
+
+    format!(
+        r#" stroke="{}" stroke-width="{:.2}" stroke-linejoin="round" paint-order="stroke fill" vector-effect="non-scaling-stroke""#,
+        color.to_hex(),
+        effective_seam_stroke_width_centi_px(color, seam_stroke_width_centi_px) as f64 / 100.0,
+    )
+}
+
+fn is_outline_like_color(color: PaletteColor) -> bool {
+    let max_channel = color.r.max(color.g).max(color.b);
+    let min_channel = color.r.min(color.g).min(color.b);
+    color_luminance(color) <= OUTLINE_COLOR_LUMA_MAX
+        && max_channel.saturating_sub(min_channel) <= OUTLINE_COLOR_CHROMA_MAX
+}
+
+fn color_luminance(color: PaletteColor) -> f64 {
+    (0.2126 * f64::from(color.r)) + (0.7152 * f64::from(color.g)) + (0.0722 * f64::from(color.b))
+}
+
+fn post_smoothing_simplification_tolerance(
+    simplification_tolerance: f64,
+    smoothing_strength: f64,
+) -> f64 {
+    let base = simplification_tolerance.max(0.0);
     if base <= 0.0 {
         return 0.0;
     }
 
-    (base * (0.75 + (config.smoothing_strength * 0.50))).max(0.15)
+    (base * (0.75 + (smoothing_strength * 0.50))).max(0.15)
+}
+
+fn contour_visual_thickness(points: &[(f64, f64)]) -> f64 {
+    let perimeter = polygon_perimeter_f64(points);
+    if perimeter <= f64::EPSILON {
+        return 0.0;
+    }
+
+    (polygon_area_f64(points) * 2.0) / perimeter
+}
+
+fn polygon_perimeter_f64(points: &[(f64, f64)]) -> f64 {
+    let n = points.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    let mut perimeter = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let dx = points[j].0 - points[i].0;
+        let dy = points[j].1 - points[i].1;
+        perimeter += (dx * dx + dy * dy).sqrt();
+    }
+
+    perimeter
+}
+
+fn remap_clamped(value: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
+    if in_max <= in_min {
+        return out_max;
+    }
+
+    let t = ((value - in_min) / (in_max - in_min)).clamp(0.0, 1.0);
+    out_min + ((out_max - out_min) * t)
 }
 
 fn region_fill_area(contours: &[Contour]) -> f64 {
@@ -865,13 +1033,13 @@ mod tests {
             color: PaletteColor { r: 0, g: 0, b: 0 },
             contours: vec![vec![
                 Point::new(0, 0),
-                Point::new(4, 0),
-                Point::new(4, 4),
-                Point::new(0, 4),
+                Point::new(20, 0),
+                Point::new(20, 20),
+                Point::new(0, 20),
             ]],
         }];
 
-        let result = generate_svg_with_metrics(&regions, 4, 4, &config);
+        let result = generate_svg_with_metrics(&regions, 20, 20, &config);
         assert!(result.svg.contains(" C "));
         assert_eq!(result.svg.matches(" C ").count(), 4);
         assert_eq!(result.metrics.regions_emitted, 1);
@@ -1128,7 +1296,15 @@ mod tests {
             Point::new(1, 1),
         ]];
 
-        let result = build_path_data_from_indices(&contours, &[0], 4, 4, 1.0, &config);
+        let result = build_path_data_from_indices(
+            PaletteColor { r: 0, g: 0, b: 0 },
+            &contours,
+            &[0],
+            4,
+            4,
+            1.0,
+            &config,
+        );
 
         assert!(result.data.is_empty());
         assert_eq!(result.contours_emitted, 0);
@@ -1145,7 +1321,11 @@ mod tests {
         };
         let points = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
 
-        let regularized = regularize_contour_geometry(&points, &config);
+        let regularized = regularize_contour_geometry(
+            &points,
+            config.simplification_tolerance,
+            config.smoothing_strength,
+        );
 
         assert_eq!(regularized, points);
     }
@@ -1170,7 +1350,11 @@ mod tests {
             (0.0, 4.0),
         ];
 
-        let regularized = regularize_contour_geometry(&points, &config);
+        let regularized = regularize_contour_geometry(
+            &points,
+            config.simplification_tolerance,
+            config.smoothing_strength,
+        );
 
         assert!(regularized.len() < points.len());
         assert!(regularized.len() >= 4);
@@ -1195,8 +1379,141 @@ mod tests {
             ..crate::config::TracingConfig::default()
         };
 
-        let tolerance = post_smoothing_simplification_tolerance(&config);
+        let tolerance = post_smoothing_simplification_tolerance(
+            config.simplification_tolerance,
+            config.smoothing_strength,
+        );
         assert!(tolerance > 1.0);
         assert!(tolerance < 1.2);
+    }
+
+    #[test]
+    fn contour_geometry_profile_reduces_smoothing_for_thin_regions() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.5,
+            corner_sensitivity: 0.6,
+            ..crate::config::TracingConfig::default()
+        };
+        let thin = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 2.0), (0.0, 2.0)];
+        let broad = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+
+        let thin_profile = contour_geometry_profile(&thin, &config);
+        let broad_profile = contour_geometry_profile(&broad, &config);
+
+        assert!(thin_profile.smoothing_strength < broad_profile.smoothing_strength);
+        assert!(thin_profile.corner_sensitivity > broad_profile.corner_sensitivity);
+        assert!(thin_profile.prefer_linear);
+        assert!(!broad_profile.prefer_linear);
+    }
+
+    #[test]
+    fn seam_stroke_width_skips_thin_regions() {
+        assert_eq!(seam_stroke_width_centi_px(2.0, 0.4), 0);
+        assert!(seam_stroke_width_centi_px(10.0, 0.4) > 0);
+    }
+
+    #[test]
+    fn outline_like_colors_skip_seam_strokes() {
+        let outline = PaletteColor { r: 6, g: 6, b: 3 };
+        let accent = PaletteColor { r: 5, g: 158, b: 8 };
+
+        assert!(is_outline_like_color(outline));
+        assert!(!is_outline_like_color(accent));
+        assert_eq!(effective_seam_stroke_width_centi_px(outline, 20), 0);
+        assert_eq!(effective_seam_stroke_width_centi_px(accent, 20), 20);
+    }
+
+    #[test]
+    fn generate_svg_adds_fill_colored_seam_stroke_for_broad_regions() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.4,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 255, g: 0, b: 0 },
+            contours: vec![vec![
+                Point::new(0, 0),
+                Point::new(12, 0),
+                Point::new(12, 12),
+                Point::new(0, 12),
+            ]],
+        }];
+
+        let svg = generate_svg(&regions, 12, 12, &config);
+        assert!(svg.contains(r##"stroke="#ff0000""##));
+        assert!(svg.contains(r##"paint-order="stroke fill""##));
+    }
+
+    #[test]
+    fn generate_svg_does_not_stroke_outline_like_regions() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.4,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 6, g: 6, b: 3 },
+            contours: vec![vec![
+                Point::new(0, 0),
+                Point::new(12, 0),
+                Point::new(12, 12),
+                Point::new(0, 12),
+            ]],
+        }];
+
+        let svg = generate_svg(&regions, 12, 12, &config);
+        assert!(svg.contains(r##"fill="#060603" fill-rule="evenodd" stroke="none""##));
+    }
+
+    #[test]
+    fn generate_svg_skips_seam_stroke_for_background_and_thin_regions() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.4,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![
+            ColorRegion {
+                color: PaletteColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+                contours: vec![vec![
+                    Point::new(0, 0),
+                    Point::new(12, 0),
+                    Point::new(12, 12),
+                    Point::new(0, 12),
+                ]],
+            },
+            ColorRegion {
+                color: PaletteColor { r: 0, g: 0, b: 0 },
+                contours: vec![vec![
+                    Point::new(0, 0),
+                    Point::new(20, 0),
+                    Point::new(20, 2),
+                    Point::new(0, 2),
+                ]],
+            },
+        ];
+
+        let svg = generate_svg(&regions, 20, 12, &config);
+        assert_eq!(
+            seam_stroke_attributes(
+                PaletteColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+                20,
+                &config,
+            ),
+            r#" stroke="none""#
+        );
+        assert!(svg.contains(r##"fill="#000000" fill-rule="evenodd" stroke="none""##));
     }
 }
