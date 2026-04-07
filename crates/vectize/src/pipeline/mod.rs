@@ -33,6 +33,11 @@ use self::contour::{contour_is_hole, Contour};
 use self::svg::{generate_svg_with_metrics, generate_svg_with_trace_space, ColorRegion};
 
 const HIGH_PRECISION_TRACE_SCALE: u32 = 2;
+const ADAPTIVE_HIGH_DETAIL_MIN_REGION_AREA_FLOOR: f64 = 2.0;
+const ADAPTIVE_HIGH_DETAIL_MIN_CONTOURS: usize = 1_024;
+const ADAPTIVE_HIGH_DETAIL_TRACE_PIXELS_PER_CONTOUR: u64 = 320;
+const ADAPTIVE_HIGH_DETAIL_PALETTE_MIN: usize = 16;
+const ADAPTIVE_HIGH_DETAIL_COLOR_COUNT_MIN: u16 = 32;
 
 /// Run the complete vectorization pipeline on a decoded image.
 ///
@@ -95,6 +100,22 @@ pub fn run_pipeline_with_debug(
     // Stage 6: Build color regions for SVG generation
     let trace_width = segmentation.width;
     let trace_height = segmentation.height;
+    let effective_min_region_area = effective_svg_min_region_area(
+        config,
+        segmentation.palette.len(),
+        trace_width,
+        trace_height,
+        extracted_metrics.contours,
+    );
+    let mut svg_config = config.clone();
+    if effective_min_region_area > config.min_region_area {
+        debug!(
+            "Pipeline: raising effective SVG minimum region area from {:.2} to {:.2} for a dense high-detail trace",
+            config.min_region_area,
+            effective_min_region_area,
+        );
+        svg_config.min_region_area = effective_min_region_area;
+    }
 
     let regions: Vec<ColorRegion> = contour_groups
         .into_iter()
@@ -133,10 +154,10 @@ pub fn run_pipeline_with_debug(
             output_width,
             output_height,
             1.0 / trace_scale as f64,
-            config,
+            &svg_config,
         )
     } else {
-        generate_svg_with_metrics(&regions, trace_width, trace_height, config)
+        generate_svg_with_metrics(&regions, trace_width, trace_height, &svg_config)
     };
     let stage_metrics = TraceStageMetrics::with_svg_diagnostics(
         extracted_metrics.contours,
@@ -170,6 +191,53 @@ fn tracing_scale(config: &TracingConfig) -> u32 {
     } else {
         1
     }
+}
+
+fn effective_svg_min_region_area(
+    config: &TracingConfig,
+    palette_len: usize,
+    trace_width: u32,
+    trace_height: u32,
+    extracted_contours: usize,
+) -> f64 {
+    if should_raise_high_detail_min_region_area(
+        config,
+        palette_len,
+        trace_width,
+        trace_height,
+        extracted_contours,
+    ) {
+        ADAPTIVE_HIGH_DETAIL_MIN_REGION_AREA_FLOOR.max(config.min_region_area)
+    } else {
+        config.min_region_area
+    }
+}
+
+fn should_raise_high_detail_min_region_area(
+    config: &TracingConfig,
+    palette_len: usize,
+    trace_width: u32,
+    trace_height: u32,
+    extracted_contours: usize,
+) -> bool {
+    if !matches!(config.quality_preset, QualityPreset::High)
+        || !config.enable_preprocessing
+        || !config.enable_denoising
+        || config.color_count < ADAPTIVE_HIGH_DETAIL_COLOR_COUNT_MIN
+        || palette_len < ADAPTIVE_HIGH_DETAIL_PALETTE_MIN
+        || !uses_default_high_min_region_area(config)
+        || extracted_contours < ADAPTIVE_HIGH_DETAIL_MIN_CONTOURS
+    {
+        return false;
+    }
+
+    let trace_pixel_count = u64::from(trace_width) * u64::from(trace_height);
+    (extracted_contours as u64) * ADAPTIVE_HIGH_DETAIL_TRACE_PIXELS_PER_CONTOUR >= trace_pixel_count
+}
+
+fn uses_default_high_min_region_area(config: &TracingConfig) -> bool {
+    let default_high = QualityPreset::High.to_config();
+    (config.min_region_area - default_high.min_region_area).abs() <= f64::EPSILON
 }
 
 /// Remove contours whose perimeter is below the despeckle threshold.
@@ -303,5 +371,42 @@ mod tests {
     fn tracing_scale_uses_dense_grid_for_high_preset() {
         assert_eq!(tracing_scale(&QualityPreset::Balanced.to_config()), 1);
         assert_eq!(tracing_scale(&QualityPreset::High.to_config()), 2);
+    }
+
+    #[test]
+    fn effective_svg_min_region_area_raises_floor_for_dense_high_detail_traces() {
+        let config = QualityPreset::High.to_config();
+
+        assert_eq!(
+            effective_svg_min_region_area(&config, 24, 1_536, 1_536, 8_740),
+            2.0
+        );
+    }
+
+    #[test]
+    fn effective_svg_min_region_area_preserves_custom_or_low_density_configs() {
+        let high = QualityPreset::High.to_config();
+        let mut custom_high = high.clone();
+        custom_high.min_region_area = 1.0;
+
+        assert_eq!(
+            effective_svg_min_region_area(&custom_high, 24, 1_536, 1_536, 8_740),
+            1.0
+        );
+        assert_eq!(
+            effective_svg_min_region_area(&high, 8, 1_536, 1_536, 8_740),
+            0.5
+        );
+        assert_eq!(effective_svg_min_region_area(&high, 24, 512, 512, 200), 0.5);
+        assert_eq!(
+            effective_svg_min_region_area(
+                &QualityPreset::Balanced.to_config(),
+                24,
+                1_536,
+                1_536,
+                8_740
+            ),
+            QualityPreset::Balanced.to_config().min_region_area
+        );
     }
 }

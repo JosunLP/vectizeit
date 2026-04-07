@@ -1039,6 +1039,55 @@ fn trace_bytes_result_collapses_antialias_bridge_palette_color_for_flat_art() {
     );
 }
 
+#[test]
+fn trace_bytes_high_preset_filters_more_tiny_regions_on_dense_jpeg_like_noise() {
+    let img = ImageBuffer::from_fn(192, 192, |x, y| {
+        let base_r = (((x * 5) + (y * 3)) % 256) as u8;
+        let base_g = (((x * 7) + (y * 11)) % 256) as u8;
+        let base_b = (((x * 13) + (y * 9)) % 256) as u8;
+
+        if x % 11 == 0 && y % 7 == 0 {
+            Rgba([
+                base_r.saturating_add(70),
+                base_g.saturating_sub(50),
+                base_b.saturating_add(55),
+                255,
+            ])
+        } else {
+            Rgba([base_r, base_g, base_b, 255])
+        }
+    });
+    let bytes = encode_jpeg(&img);
+
+    let default_high = Tracer::with_preset(QualityPreset::High)
+        .trace_bytes_result(&bytes)
+        .unwrap();
+    let explicit_high = Tracer::new(TracingConfig {
+        min_region_area: 0.0,
+        ..QualityPreset::High.to_config()
+    })
+    .trace_bytes_result(&bytes)
+    .unwrap();
+
+    let default_metrics = default_high
+        .stage_metrics()
+        .expect("stage metrics should be present");
+    let explicit_metrics = explicit_high
+        .stage_metrics()
+        .expect("stage metrics should be present");
+
+    assert!(
+        default_metrics.contours_filtered_min_area()
+            >= explicit_metrics.contours_filtered_min_area(),
+        "default high tracing should not keep more tiny regions than an explicit zero min-area override"
+    );
+    assert!(
+        default_high.svg().matches("<path").count()
+            <= explicit_high.svg().matches("<path").count(),
+        "default high tracing should emit no more path fragments than the explicit zero min-area override"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Error Type Tests
 // ---------------------------------------------------------------------------
