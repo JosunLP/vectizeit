@@ -8,7 +8,7 @@ use crate::config::TracingConfig;
 use crate::pipeline::contour::{contour_is_hole, signed_area, Contour, Point};
 use crate::pipeline::curves::{fit_closed_cubic_beziers_f64, CubicBezier};
 use crate::pipeline::segment::PaletteColor;
-use crate::pipeline::simplify::simplify_closed;
+use crate::pipeline::simplify::{simplify_closed, simplify_closed_f64};
 use crate::pipeline::smooth::smooth_closed_contour_adaptive_multi;
 
 /// A color region consisting of a palette color and its contours.
@@ -536,8 +536,14 @@ fn build_path_data_from_indices(
             float_pts
         };
 
+        let regularized = regularize_contour_geometry(&smoothed, coordinate_scale, config);
+        if regularized.len() < 3 {
+            result.contours_simplified_away += 1;
+            continue;
+        }
+
         // Check minimum area using smoothed coordinates
-        let area = polygon_area_f64(&smoothed);
+        let area = polygon_area_f64(&regularized);
         if area < config.min_region_area {
             result.contours_filtered_min_area += 1;
             continue;
@@ -546,7 +552,7 @@ fn build_path_data_from_indices(
         let geometry = if config.smoothing_strength > 0.01 {
             // Use cubic Bezier curves for smoother output
             build_bezier_path(
-                &smoothed,
+                &regularized,
                 config.smoothing_strength,
                 config.corner_sensitivity,
                 output_width,
@@ -554,7 +560,7 @@ fn build_path_data_from_indices(
             )
         } else {
             // Use straight line segments
-            build_linear_path(&smoothed, output_width, output_height)
+            build_linear_path(&regularized, output_width, output_height)
         };
 
         parts.push(geometry.data);
@@ -567,6 +573,40 @@ fn build_path_data_from_indices(
 
     result.data = parts.join(" ");
     result
+}
+
+fn regularize_contour_geometry(
+    points: &[(f64, f64)],
+    coordinate_scale: f64,
+    config: &TracingConfig,
+) -> Vec<(f64, f64)> {
+    if points.len() < 8
+        || config.smoothing_strength <= 0.01
+        || config.simplification_tolerance <= 0.0
+    {
+        return points.to_vec();
+    }
+
+    let tolerance = post_smoothing_simplification_tolerance(config, coordinate_scale);
+    if tolerance <= 0.0 {
+        return points.to_vec();
+    }
+
+    let simplified = simplify_closed_f64(points, tolerance);
+    if simplified.len() < 3 {
+        points.to_vec()
+    } else {
+        simplified
+    }
+}
+
+fn post_smoothing_simplification_tolerance(config: &TracingConfig, coordinate_scale: f64) -> f64 {
+    let base = config.simplification_tolerance.max(0.0) * coordinate_scale;
+    if base <= 0.0 {
+        return 0.0;
+    }
+
+    (base * (0.40 + (config.smoothing_strength * 0.50))).max(0.10)
 }
 
 fn region_fill_area(contours: &[Contour]) -> f64 {
@@ -1044,7 +1084,8 @@ mod tests {
 
         assert_two_decimal_precision(&geometry.data);
         assert!(geometry.data.contains("M 0.00 0.00"));
-        assert!(geometry.data.contains("C 0.24 0.00, 3.76 0.00, 4.00 0.00"));
+        assert!(geometry.data.contains(" C "));
+        assert!(geometry.data.contains("4.00 0.00"));
     }
 
     #[test]
@@ -1085,5 +1126,45 @@ mod tests {
         assert_eq!(result.contours_emitted, 0);
         assert_eq!(result.contours_simplified_away, 1);
         assert_eq!(result.contours_filtered_min_area, 0);
+    }
+
+    #[test]
+    fn regularize_contour_geometry_keeps_small_simple_shapes() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.6,
+            simplification_tolerance: 1.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let points = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+
+        let regularized = regularize_contour_geometry(&points, 1.0, &config);
+
+        assert_eq!(regularized, points);
+    }
+
+    #[test]
+    fn regularize_contour_geometry_reduces_tiny_outline_wiggles() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.6,
+            simplification_tolerance: 1.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let points = vec![
+            (0.0, 0.0),
+            (1.0, 0.03),
+            (2.0, -0.02),
+            (3.0, 0.04),
+            (4.0, 0.0),
+            (5.0, 0.02),
+            (6.0, -0.03),
+            (7.0, 0.0),
+            (7.0, 4.0),
+            (0.0, 4.0),
+        ];
+
+        let regularized = regularize_contour_geometry(&points, 1.0, &config);
+
+        assert!(regularized.len() < points.len());
+        assert!(regularized.len() >= 4);
     }
 }

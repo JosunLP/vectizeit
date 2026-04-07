@@ -124,6 +124,10 @@ fn fit_beziers_core(
             p3
         };
 
+        let start_tension =
+            start_tension * adaptive_handle_weight(prev, p0, p3, corner_sensitivity);
+        let end_tension = end_tension * adaptive_handle_weight(p0, p3, next, corner_sensitivity);
+
         let p1 = start_control_point(prev, p0, p3, start_tension, corners[i]);
         let p2 = end_control_point(p0, p3, next, end_tension, corners[next_idx]);
 
@@ -148,14 +152,16 @@ fn start_control_point(
     tension: f64,
     preserve_corner: bool,
 ) -> (f64, f64) {
-    if preserve_corner {
+    let raw = if preserve_corner {
         lerp2(start, end, tension)
     } else {
         (
             start.0 + tension * (end.0 - previous.0),
             start.1 + tension * (end.1 - previous.1),
         )
-    }
+    };
+
+    clamp_handle_length(start, raw, point_distance(start, end) * 0.5)
 }
 
 fn end_control_point(
@@ -165,14 +171,36 @@ fn end_control_point(
     tension: f64,
     preserve_corner: bool,
 ) -> (f64, f64) {
-    if preserve_corner {
+    let raw = if preserve_corner {
         lerp2(end, start, tension)
     } else {
         (
             end.0 - tension * (next.0 - start.0),
             end.1 - tension * (next.1 - start.1),
         )
+    };
+
+    clamp_handle_length(end, raw, point_distance(start, end) * 0.5)
+}
+
+fn adaptive_handle_weight(
+    previous: (f64, f64),
+    current: (f64, f64),
+    next: (f64, f64),
+    sensitivity: f64,
+) -> f64 {
+    if sensitivity <= 0.0 {
+        return 1.0;
     }
+
+    let Some(cos_angle) = corner_cosine(previous, current, next) else {
+        return 1.0;
+    };
+
+    let straightness = ((cos_angle + 1.0) * 0.5).clamp(0.0, 1.0);
+    let protected_weight = straightness.powf(1.0 + (sensitivity * 4.0));
+
+    1.0 - (sensitivity * (1.0 - protected_weight))
 }
 
 fn detect_closed_corners(pts: &[(f64, f64)], sensitivity: f64) -> Vec<bool> {
@@ -234,6 +262,29 @@ fn is_corner(
 
 fn lerp2(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
     (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1))
+}
+
+fn point_distance(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn clamp_handle_length(origin: (f64, f64), handle: (f64, f64), max_length: f64) -> (f64, f64) {
+    if max_length <= 0.0 {
+        return origin;
+    }
+
+    let dx = handle.0 - origin.0;
+    let dy = handle.1 - origin.1;
+    let length = (dx * dx + dy * dy).sqrt();
+
+    if length <= max_length || length < 1e-10 {
+        return handle;
+    }
+
+    let scale = max_length / length;
+    (origin.0 + dx * scale, origin.1 + dy * scale)
 }
 
 #[cfg(test)]
@@ -321,6 +372,45 @@ mod tests {
         let right = &beziers[1];
         assert!((right.p1.0 - 10.0).abs() < 1e-12);
         assert!((right.p2.0 - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn higher_corner_sensitivity_shortens_corner_handles() {
+        let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+
+        let smooth_all = fit_closed_cubic_beziers_f64(&pts, 0.8, 0.0);
+        let protect_corners = fit_closed_cubic_beziers_f64(&pts, 0.8, 1.0);
+
+        let smooth_all_handle = point_distance(smooth_all[0].p0, smooth_all[0].p1);
+        let protected_handle = point_distance(protect_corners[0].p0, protect_corners[0].p1);
+
+        assert!(protected_handle < smooth_all_handle);
+    }
+
+    #[test]
+    fn irregular_closed_contour_limits_control_handles_to_half_edge() {
+        let pts = vec![
+            (0.0, 0.0),
+            (8.0, 0.0),
+            (9.5, 2.0),
+            (9.0, 6.0),
+            (5.0, 8.0),
+            (0.0, 7.0),
+        ];
+
+        let beziers = fit_closed_cubic_beziers_f64(&pts, 1.0, 0.2);
+
+        for bezier in &beziers {
+            let edge_length = point_distance(bezier.p0, bezier.p3);
+            assert!(
+                point_distance(bezier.p0, bezier.p1) <= edge_length * 0.5 + 1e-10,
+                "start handle must stay within half the segment length"
+            );
+            assert!(
+                point_distance(bezier.p3, bezier.p2) <= edge_length * 0.5 + 1e-10,
+                "end handle must stay within half the segment length"
+            );
+        }
     }
 
     #[test]
