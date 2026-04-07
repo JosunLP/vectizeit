@@ -66,12 +66,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **107 automated tests** across four categories:
+The project includes **114 automated tests** across four categories:
 
 | Category          | Location                                      | Tests |
 | ----------------- | --------------------------------------------- | ----- |
-| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 56    |
-| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 33    |
+| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 62    |
+| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 34    |
 | CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17    |
 | Doc tests         | `crates/vectize/src/lib.rs`                   | 1     |
 
@@ -241,16 +241,16 @@ if let Err(msg) = config.validate() {
 
 The library processes images in eight sequential stages:
 
-| Stage           | Module                              | Description                                                                                                                                                                                                                                           |
-| --------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Load         | `pipeline::loader`                  | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header.                                                                                                                                   |
-| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background.                                                      |
-| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space.                                                                                                       |
-| 4. Contour      | `pipeline::contour`                 | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. Incomplete or otherwise invalid loops are discarded before downstream processing and reported through stage metrics for diagnostics. |
-| 5. Despeckle    | `pipeline::mod`                     | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles.                                                                                                                                     |
-| 6. Simplify     | `pipeline::simplify`                | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness.                                                                                                            |
-| 7. Smooth       | `pipeline::smooth`                  | Apply **Laplacian vertex relaxation** to shift grid-aligned contour vertices off the integer grid, reducing staircase artifacts before curve fitting. The relaxation weight is derived from `smoothing_strength`.                                     |
-| 8. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Fit closed contours to **cubic Bezier splines** using wrap-around corner detection and edge-aligned handles, then emit valid SVG markup with deterministic area-based path ordering so smaller details stay above larger fills.                       |
+| Stage           | Module                              | Description                                                                                                                                                                                                                                                                                                                                            |
+| --------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Load         | `pipeline::loader`                  | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header.                                                                                                                                                                                                                                    |
+| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background.                                                                                                                                                       |
+| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space.                                                                                                                                                                                                        |
+| 4. Contour      | `pipeline::contour`                 | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. Incomplete or otherwise invalid loops are discarded before downstream processing and reported through stage metrics for diagnostics.                                                                                                  |
+| 5. Despeckle    | `pipeline::mod`                     | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles.                                                                                                                                                                                                                                      |
+| 6. Simplify     | `pipeline::simplify`                | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness.                                                                                                                                                                                                             |
+| 7. Smooth       | `pipeline::smooth`                  | Apply **adaptive Laplacian vertex relaxation** to shift grid-aligned contour vertices off the integer grid while damping the effect near sharp corners, reducing staircase artifacts without rounding away important structure before curve fitting. The relaxation weight is derived from `smoothing_strength` and modulated by `corner_sensitivity`. |
+| 8. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Fit closed contours to **cubic Bezier splines** using wrap-around corner detection and edge-aligned handles, then emit valid SVG markup with deterministic area-based path ordering so smaller details stay above larger fills.                                                                                                                        |
 
 Border-connected pure-white background contours are omitted from final `<path>` elements
 because the document already includes a white background rectangle. Interior white islands
@@ -270,17 +270,17 @@ contours filtered by `min_region_area`, and contours suppressed as redundant bac
 
 ## Configuration Reference
 
-| Field                      | Type   | Default | Description                                            |
-| -------------------------- | ------ | ------- | ------------------------------------------------------ |
-| `color_count`              | `u16`  | `16`    | Number of palette colors (2–256)                       |
-| `simplification_tolerance` | `f64`  | `1.0`   | RDP tolerance in pixels                                |
-| `min_region_area`          | `f64`  | `4.0`   | Minimum polygon area to include                        |
-| `smoothing_strength`       | `f64`  | `0.5`   | Contour smoothing + Bezier curves (0 = straight lines) |
-| `corner_sensitivity`       | `f64`  | `0.6`   | Corner preservation threshold                          |
-| `alpha_threshold`          | `u8`   | `128`   | Pixels below this alpha are transparent                |
-| `despeckle_threshold`      | `f64`  | `2.0`   | Minimum contour perimeter                              |
-| `enable_denoising`         | `bool` | `false` | Apply Gaussian blur before tracing                     |
-| `enable_preprocessing`     | `bool` | `true`  | Enable normalization stage                             |
+| Field                      | Type   | Default | Description                                                            |
+| -------------------------- | ------ | ------- | ---------------------------------------------------------------------- |
+| `color_count`              | `u16`  | `16`    | Number of palette colors (2–256)                                       |
+| `simplification_tolerance` | `f64`  | `1.0`   | RDP tolerance in pixels                                                |
+| `min_region_area`          | `f64`  | `4.0`   | Minimum polygon area to include                                        |
+| `smoothing_strength`       | `f64`  | `0.5`   | Contour smoothing + Bezier curves (0 = straight lines)                 |
+| `corner_sensitivity`       | `f64`  | `0.6`   | Corner preservation strength for adaptive smoothing and Bezier fitting |
+| `alpha_threshold`          | `u8`   | `128`   | Pixels below this alpha are transparent                                |
+| `despeckle_threshold`      | `f64`  | `2.0`   | Minimum contour perimeter                                              |
+| `enable_denoising`         | `bool` | `false` | Apply Gaussian blur before tracing                                     |
+| `enable_preprocessing`     | `bool` | `true`  | Enable normalization stage                                             |
 
 ### Quality Presets
 
@@ -307,7 +307,7 @@ contours filtered by `min_region_area`, and contours suppressed as redundant bac
 
 ## Limitations and Tradeoffs
 
-- **Pixel-grid coordinates.** Contours are traced on integer pixel coordinates. Laplacian
+- **Pixel-grid coordinates.** Contours are traced on integer pixel coordinates. Adaptive Laplacian
   vertex smoothing shifts points off-grid before Bezier fitting, but very small images may
   still produce slightly blocky results even at high quality settings.
 - **No path merging.** Adjacent regions of the same color from different quantization buckets
@@ -325,8 +325,8 @@ contours filtered by `min_region_area`, and contours suppressed as redundant bac
 - [ ] **Parallel region processing** — use `rayon` to process color regions concurrently.
 - [ ] **Perceptual color quantization** — replace median-cut with a perceptually-uniform
   palette (e.g. Wu quantization or OCIAF).
-- [ ] **Adaptive smoothing** — apply higher smoothing to gently-curved segments and lower
-  smoothing near detected corners.
+- [ ] **Area-preserving smoothing** — reduce residual contour shrinkage on large regions while
+  keeping the current corner-aware adaptive pass stable and deterministic.
 - [ ] **Path merging** — merge adjacent same-colored paths into a single path element.
 - [ ] **WASM target** — expose the library to JavaScript/TypeScript via `wasm-bindgen`.
 - [ ] **Progress callbacks** — let callers observe pipeline stage completion for UI feedback.

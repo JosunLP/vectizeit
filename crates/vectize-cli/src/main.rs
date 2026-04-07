@@ -77,7 +77,7 @@ struct ConvertArgs {
     #[arg(long)]
     smoothing: Option<f64>,
 
-    /// Corner sensitivity 0.0–1.0 (higher preserves sharper corners)
+    /// Corner sensitivity 0.0–1.0 (higher preserves sharper corners during smoothing and curve fitting)
     #[arg(long)]
     corner_sensitivity: Option<f64>,
 
@@ -147,7 +147,7 @@ struct BatchArgs {
     #[arg(long)]
     smoothing: Option<f64>,
 
-    /// Corner sensitivity 0.0–1.0 (higher preserves sharper corners)
+    /// Corner sensitivity 0.0–1.0 (higher preserves sharper corners during smoothing and curve fitting)
     #[arg(long)]
     corner_sensitivity: Option<f64>,
 

@@ -78,7 +78,8 @@ pub struct TracingConfig {
     pub min_region_area: f64,
     /// Curve smoothing strength (0.0 = no smoothing, 1.0 = maximum).
     pub smoothing_strength: f64,
-    /// Corner sensitivity (0.0 = very smooth corners, 1.0 = preserve all corners).
+    /// Corner preservation strength for adaptive smoothing and Bezier fitting
+    /// (0.0 = smooth all corners, 1.0 = preserve sharp corners).
     pub corner_sensitivity: f64,
     /// Alpha threshold for transparency (0–255); pixels below are treated as transparent.
     pub alpha_threshold: u8,

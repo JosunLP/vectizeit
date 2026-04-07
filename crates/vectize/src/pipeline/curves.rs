@@ -39,6 +39,24 @@ pub(crate) fn fit_closed_cubic_beziers_f64(
     fit_beziers_core(points, smoothing, corner_sensitivity, true)
 }
 
+pub(crate) fn corner_cosine(
+    previous: (f64, f64),
+    current: (f64, f64),
+    next: (f64, f64),
+) -> Option<f64> {
+    let (ax, ay) = (current.0 - previous.0, current.1 - previous.1);
+    let (bx, by) = (next.0 - current.0, next.1 - current.1);
+
+    let len_a = (ax * ax + ay * ay).sqrt();
+    let len_b = (bx * bx + by * by).sqrt();
+
+    if len_a < 1e-10 || len_b < 1e-10 {
+        return None;
+    }
+
+    Some(((ax * bx + ay * by) / (len_a * len_b)).clamp(-1.0, 1.0))
+}
+
 fn fit_cubic_beziers_impl(
     points: &[Point],
     smoothing: f64,
@@ -211,18 +229,7 @@ fn is_corner(
     next: (f64, f64),
     cos_threshold: f64,
 ) -> bool {
-    let (ax, ay) = (current.0 - previous.0, current.1 - previous.1);
-    let (bx, by) = (next.0 - current.0, next.1 - current.1);
-
-    let len_a = (ax * ax + ay * ay).sqrt();
-    let len_b = (bx * bx + by * by).sqrt();
-
-    if len_a < 1e-10 || len_b < 1e-10 {
-        return false;
-    }
-
-    let cos_angle = (ax * bx + ay * by) / (len_a * len_b);
-    cos_angle < cos_threshold
+    corner_cosine(previous, current, next).is_some_and(|cos_angle| cos_angle < cos_threshold)
 }
 
 fn lerp2(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
@@ -314,5 +321,12 @@ mod tests {
         let right = &beziers[1];
         assert!((right.p1.0 - 10.0).abs() < 1e-12);
         assert!((right.p2.0 - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn corner_cosine_detects_straight_segments() {
+        let cos_angle = corner_cosine((0.0, 0.0), (5.0, 0.0), (10.0, 0.0)).unwrap();
+
+        assert!((cos_angle - 1.0).abs() < 1e-10);
     }
 }

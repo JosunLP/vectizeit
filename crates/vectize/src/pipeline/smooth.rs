@@ -1,8 +1,11 @@
 //! Contour vertex smoothing via Laplacian relaxation.
 //!
-//! Applies a single pass of weighted averaging to shift grid-aligned contour
-//! vertices off the integer grid, reducing staircase artifacts before Bezier
-//! curve fitting.
+//! Applies weighted averaging to shift grid-aligned contour vertices off the
+//! integer grid, reducing staircase artifacts before Bezier curve fitting.
+//! The adaptive variant dampens smoothing near sharp corners so the pipeline
+//! preserves more structure while still softening pixel stair-steps.
+
+use crate::pipeline::curves::corner_cosine;
 
 /// Apply one pass of Laplacian smoothing to a closed polygon.
 ///
@@ -21,6 +24,7 @@ pub(crate) fn smooth_closed_contour(points: &[(f64, f64)], weight: f64) -> Vec<(
 /// `iterations` controls how many passes are applied. More iterations produce
 /// stronger smoothing, useful for high-detail images with pronounced staircase
 /// artifacts. An iteration count of `0` returns the input unchanged.
+#[cfg(test)]
 pub(crate) fn smooth_closed_contour_multi(
     points: &[(f64, f64)],
     weight: f64,
@@ -50,9 +54,77 @@ pub(crate) fn smooth_closed_contour_multi(
     current
 }
 
+/// Apply multiple adaptive Laplacian smoothing passes to a closed polygon.
+///
+/// The base `weight` still controls the overall smoothing strength, but the
+/// per-vertex weight is reduced near sharp corners as `corner_sensitivity`
+/// increases. A sensitivity of `0.0` matches uniform smoothing, while `1.0`
+/// strongly protects sharp turns from being rounded away.
+pub(crate) fn smooth_closed_contour_adaptive_multi(
+    points: &[(f64, f64)],
+    weight: f64,
+    iterations: u32,
+    corner_sensitivity: f64,
+) -> Vec<(f64, f64)> {
+    let n = points.len();
+    if n < 3 || weight <= 0.0 || iterations == 0 {
+        return points.to_vec();
+    }
+
+    let w = weight.clamp(0.0, 1.0);
+    let sensitivity = corner_sensitivity.clamp(0.0, 1.0);
+    let mut current = points.to_vec();
+
+    for _ in 0..iterations {
+        current = (0..n)
+            .map(|i| {
+                let prev = current[(i + n - 1) % n];
+                let curr = current[i];
+                let next = current[(i + 1) % n];
+                let avg_x = (prev.0 + next.0) * 0.5;
+                let avg_y = (prev.1 + next.1) * 0.5;
+                let local_weight = w * adaptive_corner_weight(prev, curr, next, sensitivity);
+
+                (
+                    curr.0 + local_weight * (avg_x - curr.0),
+                    curr.1 + local_weight * (avg_y - curr.1),
+                )
+            })
+            .collect();
+    }
+
+    current
+}
+
+fn adaptive_corner_weight(
+    previous: (f64, f64),
+    current: (f64, f64),
+    next: (f64, f64),
+    sensitivity: f64,
+) -> f64 {
+    if sensitivity <= 0.0 {
+        return 1.0;
+    }
+
+    let Some(cos_angle) = corner_cosine(previous, current, next) else {
+        return 1.0;
+    };
+
+    let straightness = ((cos_angle + 1.0) * 0.5).clamp(0.0, 1.0);
+    let protected_weight = straightness.powf(1.0 + (sensitivity * 4.0));
+
+    1.0 - (sensitivity * (1.0 - protected_weight))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn displacement(a: (f64, f64), b: (f64, f64)) -> f64 {
+        let dx = a.0 - b.0;
+        let dy = a.1 - b.1;
+        (dx * dx + dy * dy).sqrt()
+    }
 
     #[test]
     fn zero_weight_returns_unchanged() {
@@ -232,6 +304,62 @@ mod tests {
         assert!(
             three_disp > one_disp,
             "more iterations should produce more displacement"
+        );
+    }
+
+    #[test]
+    fn adaptive_zero_corner_sensitivity_matches_uniform_smoothing() {
+        let pts = vec![
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (6.0, 1.0),
+            (8.0, 0.0),
+            (8.0, 6.0),
+            (0.0, 6.0),
+        ];
+
+        let uniform = smooth_closed_contour_multi(&pts, 0.4, 2);
+        let adaptive = smooth_closed_contour_adaptive_multi(&pts, 0.4, 2, 0.0);
+
+        for i in 0..pts.len() {
+            assert!(
+                (uniform[i].0 - adaptive[i].0).abs() < 1e-10,
+                "x mismatch at vertex {i}"
+            );
+            assert!(
+                (uniform[i].1 - adaptive[i].1).abs() < 1e-10,
+                "y mismatch at vertex {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_smoothing_preserves_sharp_corners_more_than_gentle_bends() {
+        let pts = vec![
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (6.0, 0.2),
+            (9.0, 0.0),
+            (9.0, 6.0),
+            (0.0, 6.0),
+        ];
+
+        let uniform = smooth_closed_contour_multi(&pts, 0.45, 1);
+        let adaptive = smooth_closed_contour_adaptive_multi(&pts, 0.45, 1, 1.0);
+
+        let corner_index = 3;
+        let gentle_index = 2;
+        let uniform_corner_displacement = displacement(uniform[corner_index], pts[corner_index]);
+        let adaptive_corner_displacement = displacement(adaptive[corner_index], pts[corner_index]);
+        let adaptive_gentle_displacement = displacement(adaptive[gentle_index], pts[gentle_index]);
+
+        assert!(
+            adaptive_corner_displacement < uniform_corner_displacement,
+            "adaptive smoothing should reduce corner drift"
+        );
+        assert!(
+            adaptive_gentle_displacement > adaptive_corner_displacement,
+            "gentle bends should still smooth more than sharp corners"
         );
     }
 }

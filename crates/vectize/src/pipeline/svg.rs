@@ -9,7 +9,7 @@ use crate::pipeline::contour::{contour_is_hole, signed_area, Contour, Point};
 use crate::pipeline::curves::{fit_closed_cubic_beziers_f64, CubicBezier};
 use crate::pipeline::segment::PaletteColor;
 use crate::pipeline::simplify::simplify_closed;
-use crate::pipeline::smooth::smooth_closed_contour_multi;
+use crate::pipeline::smooth::smooth_closed_contour_adaptive_multi;
 
 /// A color region consisting of a palette color and its contours.
 pub struct ColorRegion {
@@ -491,7 +491,8 @@ fn build_path_data_from_indices(
             continue;
         }
 
-        // Convert to float and apply Laplacian smoothing proportional to strength
+        // Convert to float and apply corner-aware Laplacian smoothing
+        // proportional to the configured strength.
         let float_pts: Vec<(f64, f64)> = simplified
             .iter()
             .map(|p| (p.x as f64, p.y as f64))
@@ -500,7 +501,12 @@ fn build_path_data_from_indices(
             // Derive iteration count from strength: low strength => 1 pass,
             // higher strength => more passes for stronger staircase reduction.
             let iterations = 1 + (config.smoothing_strength * 2.0).floor() as u32;
-            smooth_closed_contour_multi(&float_pts, config.smoothing_strength * 0.5, iterations)
+            smooth_closed_contour_adaptive_multi(
+                &float_pts,
+                config.smoothing_strength * 0.5,
+                iterations,
+                config.corner_sensitivity,
+            )
         } else {
             float_pts
         };

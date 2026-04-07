@@ -12,7 +12,8 @@
 //! 3. **Segmentation** – reduce colors via median-cut quantization
 //! 4. **Contour extraction** – trace deterministic grid-edge loops with hole preservation
 //! 5. **Simplification** – reduce polygon complexity with Ramer-Douglas-Peucker
-//! 6. **Curve fitting** – smooth closed contours with corner-aware cubic Bezier splines
+//! 6. **Contour smoothing + curve fitting** – adaptively smooth closed contours,
+//!    then fit corner-aware cubic Bezier splines
 //! 7. **SVG generation** – emit clean, valid SVG markup
 //!
 //! ## Quick Start

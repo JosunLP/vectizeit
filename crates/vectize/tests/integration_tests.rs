@@ -65,6 +65,47 @@ fn extract_path_number_tokens(svg: &str) -> Vec<String> {
     values
 }
 
+fn extract_path_coordinate_pairs(svg: &str) -> Vec<(f64, f64)> {
+    let values = extract_path_numbers(svg);
+    let pairs: Vec<(f64, f64)> = values
+        .chunks_exact(2)
+        .map(|chunk| (chunk[0], chunk[1]))
+        .collect();
+
+    assert_eq!(
+        pairs.len() * 2,
+        values.len(),
+        "path coordinates must be paired"
+    );
+    pairs
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PathBounds {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+fn path_bounds(points: &[(f64, f64)]) -> PathBounds {
+    let mut bounds = PathBounds {
+        min_x: f64::INFINITY,
+        min_y: f64::INFINITY,
+        max_x: f64::NEG_INFINITY,
+        max_y: f64::NEG_INFINITY,
+    };
+
+    for &(x, y) in points {
+        bounds.min_x = bounds.min_x.min(x);
+        bounds.min_y = bounds.min_y.min(y);
+        bounds.max_x = bounds.max_x.max(x);
+        bounds.max_y = bounds.max_y.max(y);
+    }
+
+    bounds
+}
+
 fn parse_svg_numbers(data: &str) -> Vec<f64> {
     parse_svg_number_tokens(data)
         .into_iter()
@@ -356,6 +397,63 @@ fn trace_bytes_smoothing_keeps_edge_touching_coordinates_inside_viewbox() {
             .iter()
             .all(|value| (0.0..=20.0).contains(value)),
         "edge-touching smoothed coordinates must stay inside the viewBox, got {path_numbers:?}"
+    );
+}
+
+#[test]
+fn trace_bytes_corner_sensitive_smoothing_preserves_more_region_extent() {
+    let img = ImageBuffer::from_fn(14, 14, |x, y| {
+        if (3..=10).contains(&x) && (3..=10).contains(&y) {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let low_corner_config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 1.0,
+        corner_sensitivity: 0.0,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+        background_color: None,
+    };
+    let high_corner_config = TracingConfig {
+        corner_sensitivity: 1.0,
+        ..low_corner_config.clone()
+    };
+
+    let low_corner_result = Tracer::new(low_corner_config)
+        .trace_bytes_result(&bytes)
+        .unwrap();
+    let high_corner_result = Tracer::new(high_corner_config)
+        .trace_bytes_result(&bytes)
+        .unwrap();
+
+    let low_bounds = path_bounds(&extract_path_coordinate_pairs(low_corner_result.svg()));
+    let high_bounds = path_bounds(&extract_path_coordinate_pairs(high_corner_result.svg()));
+
+    assert!(
+        high_bounds.min_x <= low_bounds.min_x,
+        "higher corner sensitivity should keep the left edge from drifting inward"
+    );
+    assert!(
+        high_bounds.min_y <= low_bounds.min_y,
+        "higher corner sensitivity should keep the top edge from drifting inward"
+    );
+    assert!(
+        high_bounds.max_x >= low_bounds.max_x,
+        "higher corner sensitivity should keep the right edge from drifting inward"
+    );
+    assert!(
+        high_bounds.max_y >= low_bounds.max_y,
+        "higher corner sensitivity should keep the bottom edge from drifting inward"
     );
 }
 
