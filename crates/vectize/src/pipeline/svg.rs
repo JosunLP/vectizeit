@@ -510,7 +510,10 @@ fn build_path_data_from_indices(
         }
 
         // Simplify the closed polygon
-        let simplified = simplify_closed(contour, config.simplification_tolerance);
+        let simplified = simplify_closed(
+            contour,
+            trace_space_simplification_tolerance(config, coordinate_scale),
+        );
         if simplified.len() < 3 {
             result.contours_simplified_away += 1;
             continue;
@@ -536,7 +539,7 @@ fn build_path_data_from_indices(
             float_pts
         };
 
-        let regularized = regularize_contour_geometry(&smoothed, coordinate_scale, config);
+        let regularized = regularize_contour_geometry(&smoothed, config);
         if regularized.len() < 3 {
             result.contours_simplified_away += 1;
             continue;
@@ -575,11 +578,7 @@ fn build_path_data_from_indices(
     result
 }
 
-fn regularize_contour_geometry(
-    points: &[(f64, f64)],
-    coordinate_scale: f64,
-    config: &TracingConfig,
-) -> Vec<(f64, f64)> {
+fn regularize_contour_geometry(points: &[(f64, f64)], config: &TracingConfig) -> Vec<(f64, f64)> {
     if points.len() < 8
         || config.smoothing_strength <= 0.01
         || config.simplification_tolerance <= 0.0
@@ -587,7 +586,7 @@ fn regularize_contour_geometry(
         return points.to_vec();
     }
 
-    let tolerance = post_smoothing_simplification_tolerance(config, coordinate_scale);
+    let tolerance = post_smoothing_simplification_tolerance(config);
     if tolerance <= 0.0 {
         return points.to_vec();
     }
@@ -600,13 +599,22 @@ fn regularize_contour_geometry(
     }
 }
 
-fn post_smoothing_simplification_tolerance(config: &TracingConfig, coordinate_scale: f64) -> f64 {
-    let base = config.simplification_tolerance.max(0.0) * coordinate_scale;
+fn trace_space_simplification_tolerance(config: &TracingConfig, coordinate_scale: f64) -> f64 {
+    let base = config.simplification_tolerance.max(0.0);
+    if base <= 0.0 || coordinate_scale <= f64::EPSILON {
+        return base;
+    }
+
+    base / coordinate_scale
+}
+
+fn post_smoothing_simplification_tolerance(config: &TracingConfig) -> f64 {
+    let base = config.simplification_tolerance.max(0.0);
     if base <= 0.0 {
         return 0.0;
     }
 
-    (base * (0.40 + (config.smoothing_strength * 0.50))).max(0.10)
+    (base * (0.75 + (config.smoothing_strength * 0.50))).max(0.15)
 }
 
 fn region_fill_area(contours: &[Contour]) -> f64 {
@@ -1137,7 +1145,7 @@ mod tests {
         };
         let points = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
 
-        let regularized = regularize_contour_geometry(&points, 1.0, &config);
+        let regularized = regularize_contour_geometry(&points, &config);
 
         assert_eq!(regularized, points);
     }
@@ -1162,9 +1170,33 @@ mod tests {
             (0.0, 4.0),
         ];
 
-        let regularized = regularize_contour_geometry(&points, 1.0, &config);
+        let regularized = regularize_contour_geometry(&points, &config);
 
         assert!(regularized.len() < points.len());
         assert!(regularized.len() >= 4);
+    }
+
+    #[test]
+    fn trace_space_simplification_tolerance_scales_with_dense_trace_grids() {
+        let config = crate::config::TracingConfig {
+            simplification_tolerance: 1.2,
+            ..crate::config::TracingConfig::default()
+        };
+
+        assert!((trace_space_simplification_tolerance(&config, 1.0) - 1.2).abs() < 1e-10);
+        assert!((trace_space_simplification_tolerance(&config, 0.5) - 2.4).abs() < 1e-10);
+    }
+
+    #[test]
+    fn post_smoothing_regularization_tolerance_stays_in_output_space() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.35,
+            simplification_tolerance: 1.2,
+            ..crate::config::TracingConfig::default()
+        };
+
+        let tolerance = post_smoothing_simplification_tolerance(&config);
+        assert!(tolerance > 1.0);
+        assert!(tolerance < 1.2);
     }
 }
