@@ -194,7 +194,7 @@ fn trace_bytes_emits_smaller_detail_after_larger_background() {
         if (4..=7).contains(&x) && (4..=7).contains(&y) {
             Rgba([255, 0, 0, 255])
         } else {
-            Rgba([0, 0, 0, 255])
+            Rgba([0, 0, 255, 255])
         }
     });
     let bytes = encode_png(&img);
@@ -214,7 +214,7 @@ fn trace_bytes_emits_smaller_detail_after_larger_background() {
     };
 
     let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
-    let background_index = svg.find("fill=\"#000000\"").unwrap();
+    let background_index = svg.find("fill=\"#0000ff\"").unwrap();
     let detail_index = svg.find("fill=\"#ff0000\"").unwrap();
 
     assert!(background_index < detail_index);
@@ -675,7 +675,9 @@ fn trace_bytes_result_uses_closed_beziers_for_closed_contours() {
     assert_eq!(metrics.contours_suppressed_background(), 0);
     assert!(!path_numbers.is_empty());
     assert!(
-        path_numbers.iter().all(|value| (0.0..=20.0).contains(value)),
+        path_numbers
+            .iter()
+            .all(|value| (0.0..=20.0).contains(value)),
         "smoothed coordinates must stay inside the viewBox, got {path_numbers:?}"
     );
 }

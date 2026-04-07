@@ -134,7 +134,7 @@ pub(crate) fn generate_svg_with_trace_space(
 ) -> SvgBuildResult {
     let mut svg = String::new();
     let mut metrics = SvgEmissionMetrics::default();
-    let ordered_regions = order_regions_for_emission(regions);
+    let ordered_regions = order_regions_for_emission(regions, config);
 
     let bg = config.background_color.unwrap_or((255, 255, 255));
     let bg_fill = format!("#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2);
@@ -200,8 +200,11 @@ pub(crate) fn generate_svg_with_trace_space(
     SvgBuildResult { svg, metrics }
 }
 
-fn order_regions_for_emission(regions: &[ColorRegion]) -> Vec<OrderedRegion<'_>> {
-    let mut ordered_regions: Vec<OrderedRegion<'_>> = regions
+fn order_regions_for_emission<'a>(
+    regions: &'a [ColorRegion],
+    config: &TracingConfig,
+) -> Vec<OrderedRegion<'a>> {
+    let mut ordered_regions: Vec<OrderedRegion<'a>> = regions
         .iter()
         .enumerate()
         .map(|(index, region)| OrderedRegion {
@@ -212,13 +215,25 @@ fn order_regions_for_emission(regions: &[ColorRegion]) -> Vec<OrderedRegion<'_>>
         .collect();
 
     ordered_regions.sort_by(|left, right| {
-        right
-            .fill_area
-            .total_cmp(&left.fill_area)
-            .then_with(|| left.index.cmp(&right.index))
+        region_emission_priority(left.region.color, config)
+            .cmp(&region_emission_priority(right.region.color, config))
+            .then_with(|| {
+                right
+                    .fill_area
+                    .total_cmp(&left.fill_area)
+                    .then_with(|| left.index.cmp(&right.index))
+            })
     });
 
     ordered_regions
+}
+
+fn region_emission_priority(color: PaletteColor, config: &TracingConfig) -> u8 {
+    if is_outline_like_color(color) && !is_background_color(color, config) {
+        1
+    } else {
+        0
+    }
 }
 
 fn build_region_paths(
@@ -1092,7 +1107,7 @@ mod tests {
                 ]],
             },
             ColorRegion {
-                color: PaletteColor { r: 0, g: 0, b: 0 },
+                color: PaletteColor { r: 0, g: 0, b: 255 },
                 contours: vec![vec![
                     Point::new(0, 0),
                     Point::new(8, 0),
@@ -1103,10 +1118,46 @@ mod tests {
         ];
 
         let svg = generate_svg(&regions, 8, 8, &config);
-        let background_index = svg.find("fill=\"#000000\"").unwrap();
+        let background_index = svg.find("fill=\"#0000ff\"").unwrap();
         let detail_index = svg.find("fill=\"#ff0000\"").unwrap();
 
         assert!(background_index < detail_index);
+    }
+
+    #[test]
+    fn generate_svg_emits_outline_like_regions_after_colored_fills() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.4,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![
+            ColorRegion {
+                color: PaletteColor { r: 6, g: 6, b: 3 },
+                contours: vec![vec![
+                    Point::new(0, 0),
+                    Point::new(12, 0),
+                    Point::new(12, 12),
+                    Point::new(0, 12),
+                ]],
+            },
+            ColorRegion {
+                color: PaletteColor { r: 0, g: 0, b: 255 },
+                contours: vec![vec![
+                    Point::new(2, 2),
+                    Point::new(10, 2),
+                    Point::new(10, 10),
+                    Point::new(2, 10),
+                ]],
+            },
+        ];
+
+        let svg = generate_svg(&regions, 12, 12, &config);
+        let fill_index = svg.find(r##"fill="#0000ff""##).unwrap();
+        let outline_index = svg.rfind(r##"fill="#060603""##).unwrap();
+
+        assert!(fill_index < outline_index);
     }
 
     #[test]

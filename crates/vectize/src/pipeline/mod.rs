@@ -78,7 +78,7 @@ pub fn run_pipeline_with_debug(
         "Pipeline: quantizing colors (target: {})",
         config.color_count
     );
-    let segmentation = segment::quantize(&trace_image, config.color_count, config.alpha_threshold);
+    let segmentation = segment::quantize(&trace_image, config);
 
     // Stage 4: Contour extraction
     debug!("Pipeline: extracting contours");

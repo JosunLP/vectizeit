@@ -4,9 +4,11 @@
 //! Reduces the image to a fixed palette and produces a labeled pixel map
 //! where each pixel is assigned a color index.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use image::{ImageBuffer, Rgba};
+
+use crate::config::{QualityPreset, TracingConfig};
 
 const STRONG_ADAPTIVE_FLAT_ART_COLOR_CAP: usize = 12;
 const STRONG_ADAPTIVE_FLAT_ART_COVERAGE_NUMERATOR: u32 = 17;
@@ -32,6 +34,10 @@ const BRIDGE_LABEL_RARITY_RATIO: u32 = 3;
 const BRIDGE_LABEL_DOMINANT_ADJACENCY_NUMERATOR: u32 = 4;
 const BRIDGE_LABEL_DOMINANT_ADJACENCY_DENOMINATOR: u32 = 5;
 const PALETTE_REFINEMENT_CYCLES: usize = 3;
+const TINY_COMPONENT_CLEANUP_PASSES: usize = 2;
+const HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN: usize = 16;
+const HIGH_DETAIL_TINY_COMPONENT_MAX_AREA: usize = 32;
+const AMBIGUOUS_TINY_COMPONENT_MAX_AREA: usize = 4;
 
 /// An entry in the color palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,18 +109,17 @@ pub struct SegmentationResult {
 /// deterministic reassignment passes, and assign each pixel a palette index.
 pub fn quantize(
     img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
-    color_count: u16,
-    alpha_threshold: u8,
+    config: &TracingConfig,
 ) -> SegmentationResult {
     let (width, height) = img.dimensions();
 
-    let pixels = collect_pixels(img, alpha_threshold);
-    let max_colors = adaptive_color_budget(&pixels, color_count.max(2) as usize);
+    let pixels = collect_pixels(img, config.alpha_threshold);
+    let max_colors = adaptive_color_budget(&pixels, config.color_count.max(2) as usize);
 
-    let mut result = quantize_with_budget(&pixels, width, height, max_colors);
+    let mut result = quantize_with_budget(&pixels, width, height, max_colors, config);
 
     if let Some(flat_art_cap) = flat_art_rerun_cap(&result.labels, result.palette.len()) {
-        result = quantize_with_budget(&pixels, width, height, flat_art_cap);
+        result = quantize_with_budget(&pixels, width, height, flat_art_cap, config);
     }
 
     result
@@ -125,6 +130,7 @@ fn quantize_with_budget(
     width: u32,
     height: u32,
     max_colors: usize,
+    config: &TracingConfig,
 ) -> SegmentationResult {
     let palette = deduplicate_palette(refine_palette(
         pixels,
@@ -134,6 +140,14 @@ fn quantize_with_budget(
     let mut labels = assign_rgb_labels(pixels, &palette);
     cleanup_antialias_fringes(pixels, &mut labels, &palette, width, height);
     collapse_bridge_palette_labels(pixels, &mut labels, &palette, width, height);
+    cleanup_tiny_label_components(
+        pixels,
+        &mut labels,
+        &palette,
+        width,
+        height,
+        tiny_component_cleanup_area_threshold(config, palette.len()),
+    );
     let compact_palette = compact_palette(&mut labels, &palette);
     let palette_colors: Vec<PaletteColor> = compact_palette
         .iter()
@@ -145,6 +159,19 @@ fn quantize_with_budget(
         labels,
         width,
         height,
+    }
+}
+
+fn tiny_component_cleanup_area_threshold(config: &TracingConfig, palette_len: usize) -> usize {
+    if matches!(config.quality_preset, QualityPreset::High)
+        && config.enable_preprocessing
+        && config.enable_denoising
+        && config.color_count >= 32
+        && palette_len >= HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN
+    {
+        HIGH_DETAIL_TINY_COMPONENT_MAX_AREA
+    } else {
+        0
     }
 }
 
@@ -461,6 +488,197 @@ fn collapse_bridge_palette_labels(
             break;
         }
     }
+}
+
+fn cleanup_tiny_label_components(
+    pixels: &[[u8; 3]],
+    labels: &mut [u8],
+    palette: &[[u8; 3]],
+    width: u32,
+    height: u32,
+    max_component_area: usize,
+) {
+    if max_component_area == 0
+        || palette.len() < 2
+        || labels.len() != pixels.len()
+        || width < 2
+        || height < 2
+    {
+        return;
+    }
+
+    let width = width as usize;
+    let height = height as usize;
+
+    for _ in 0..TINY_COMPONENT_CLEANUP_PASSES {
+        let mut visited = vec![false; labels.len()];
+        let mut changes = Vec::new();
+
+        for start in 0..labels.len() {
+            if visited[start] {
+                continue;
+            }
+
+            let current_label = labels[start];
+            let mut queue = VecDeque::new();
+            queue.push_back(start);
+            visited[start] = true;
+
+            let mut component_area = 0usize;
+            let mut component_pixels = Vec::with_capacity(max_component_area);
+            let mut component_accumulator = PaletteAccumulator::default();
+            let mut boundary_counts = vec![0u16; palette.len()];
+            let mut track_component = true;
+
+            while let Some(index) = queue.pop_front() {
+                component_area += 1;
+                if track_component {
+                    component_pixels.push(index);
+                    component_accumulator.push(pixels[index]);
+                    if component_area > max_component_area {
+                        track_component = false;
+                        component_pixels.clear();
+                        boundary_counts.fill(0);
+                    }
+                }
+
+                let x = index % width;
+                let y = index / width;
+
+                if x > 0 {
+                    visit_component_neighbor(
+                        index - 1,
+                        current_label,
+                        labels,
+                        &mut visited,
+                        &mut queue,
+                        track_component,
+                        &mut boundary_counts,
+                    );
+                }
+                if x + 1 < width {
+                    visit_component_neighbor(
+                        index + 1,
+                        current_label,
+                        labels,
+                        &mut visited,
+                        &mut queue,
+                        track_component,
+                        &mut boundary_counts,
+                    );
+                }
+                if y > 0 {
+                    visit_component_neighbor(
+                        index - width,
+                        current_label,
+                        labels,
+                        &mut visited,
+                        &mut queue,
+                        track_component,
+                        &mut boundary_counts,
+                    );
+                }
+                if y + 1 < height {
+                    visit_component_neighbor(
+                        index + width,
+                        current_label,
+                        labels,
+                        &mut visited,
+                        &mut queue,
+                        track_component,
+                        &mut boundary_counts,
+                    );
+                }
+            }
+
+            if component_area > max_component_area {
+                continue;
+            }
+
+            let component_mean = component_accumulator.average_or(palette[current_label as usize]);
+            let Some(replacement) = choose_tiny_component_replacement(
+                component_mean,
+                current_label,
+                &boundary_counts,
+                palette,
+            ) else {
+                continue;
+            };
+
+            let dominant_boundary = boundary_counts[replacement as usize] as usize;
+            let boundary_total = boundary_counts
+                .iter()
+                .map(|&count| count as usize)
+                .sum::<usize>();
+
+            if component_area > AMBIGUOUS_TINY_COMPONENT_MAX_AREA
+                && dominant_boundary * 2 < boundary_total
+            {
+                continue;
+            }
+
+            changes.extend(
+                component_pixels
+                    .into_iter()
+                    .map(|index| (index, replacement)),
+            );
+        }
+
+        if changes.is_empty() {
+            break;
+        }
+
+        for (index, replacement) in changes {
+            labels[index] = replacement;
+        }
+    }
+}
+
+fn visit_component_neighbor(
+    neighbor_index: usize,
+    current_label: u8,
+    labels: &[u8],
+    visited: &mut [bool],
+    queue: &mut VecDeque<usize>,
+    track_component: bool,
+    boundary_counts: &mut [u16],
+) {
+    let neighbor_label = labels[neighbor_index];
+
+    if neighbor_label == current_label {
+        if !visited[neighbor_index] {
+            visited[neighbor_index] = true;
+            queue.push_back(neighbor_index);
+        }
+    } else if track_component {
+        boundary_counts[neighbor_label as usize] += 1;
+    }
+}
+
+fn choose_tiny_component_replacement(
+    component_mean: [u8; 3],
+    current_label: u8,
+    boundary_counts: &[u16],
+    palette: &[[u8; 3]],
+) -> Option<u8> {
+    let mut best_label = None;
+    let mut best_support = 0u16;
+    let mut best_distance = u32::MAX;
+
+    for (label_index, &support) in boundary_counts.iter().enumerate() {
+        if label_index == current_label as usize || support == 0 {
+            continue;
+        }
+
+        let distance = color_distance_sq(component_mean, palette[label_index]);
+        if support > best_support || (support == best_support && distance < best_distance) {
+            best_label = Some(label_index as u8);
+            best_support = support;
+            best_distance = distance;
+        }
+    }
+
+    best_label
 }
 
 fn label_usage(labels: &[u8], palette_len: usize) -> Vec<u32> {
@@ -834,7 +1052,11 @@ mod tests {
         for px in img.pixels_mut() {
             *px = Rgba([200, 100, 50, 255]);
         }
-        let result = quantize(&img, 8, 128);
+        let config = TracingConfig {
+            color_count: 8,
+            ..TracingConfig::default()
+        };
+        let result = quantize(&img, &config);
         assert!(!result.palette.is_empty());
         assert_eq!(result.labels.len(), 16);
     }
@@ -846,7 +1068,11 @@ mod tests {
         let img =
             ImageBuffer::from_fn(10, 10, |x, y| if y == 0 && x < 10 { accent } else { major });
 
-        let result = quantize(&img, 2, 128);
+        let config = TracingConfig {
+            color_count: 2,
+            ..TracingConfig::default()
+        };
+        let result = quantize(&img, &config);
         let reds: Vec<u8> = result.palette.iter().map(|color| color.r).collect();
 
         assert!(reds.iter().any(|&red| red <= 40));
@@ -866,8 +1092,12 @@ mod tests {
             }
         });
 
-        let first = quantize(&img, 3, 128);
-        let second = quantize(&img, 3, 128);
+        let config = TracingConfig {
+            color_count: 3,
+            ..TracingConfig::default()
+        };
+        let first = quantize(&img, &config);
+        let second = quantize(&img, &config);
 
         assert_eq!(first.palette, second.palette);
         assert_eq!(first.labels, second.labels);
@@ -1018,5 +1248,55 @@ mod tests {
 
         assert_eq!(compact.len(), 3);
         assert_eq!(labels[4], 1);
+    }
+
+    #[test]
+    fn tiny_component_cleanup_threshold_only_applies_to_rich_high_detail_configs() {
+        let high = QualityPreset::High.to_config();
+        let balanced = QualityPreset::Balanced.to_config();
+
+        assert_eq!(tiny_component_cleanup_area_threshold(&high, 24), 32);
+        assert_eq!(tiny_component_cleanup_area_threshold(&high, 8), 0);
+        assert_eq!(tiny_component_cleanup_area_threshold(&balanced, 24), 0);
+    }
+
+    #[test]
+    fn cleanup_tiny_label_components_reassigns_small_islands() {
+        let mut labels = vec![
+            0, 0, 0, 0, 0, //
+            0, 1, 1, 0, 0, //
+            0, 1, 1, 0, 0, //
+            0, 0, 0, 0, 0, //
+            0, 0, 0, 0, 0,
+        ];
+        let pixels = labels
+            .iter()
+            .map(|&label| if label == 0 { [8, 8, 16] } else { [12, 12, 20] })
+            .collect::<Vec<_>>();
+        let palette = vec![[8, 8, 16], [12, 12, 20], [200, 80, 120]];
+
+        cleanup_tiny_label_components(&pixels, &mut labels, &palette, 5, 5, 4);
+
+        assert!(labels.iter().all(|&label| label == 0));
+    }
+
+    #[test]
+    fn cleanup_tiny_label_components_preserves_long_features_above_limit() {
+        let mut labels = vec![
+            0, 0, 1, 0, 0, //
+            0, 0, 1, 0, 0, //
+            0, 0, 1, 0, 0, //
+            0, 0, 1, 0, 0, //
+            0, 0, 1, 0, 0,
+        ];
+        let pixels = labels
+            .iter()
+            .map(|&label| if label == 0 { [8, 8, 16] } else { [16, 16, 28] })
+            .collect::<Vec<_>>();
+        let palette = vec![[8, 8, 16], [16, 16, 28]];
+
+        cleanup_tiny_label_components(&pixels, &mut labels, &palette, 5, 5, 4);
+
+        assert_eq!(labels.iter().filter(|&&label| label == 1).count(), 5);
     }
 }
