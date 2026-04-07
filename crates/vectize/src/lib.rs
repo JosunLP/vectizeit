@@ -9,7 +9,8 @@
 //!
 //! 1. **Loading** – decode the source image
 //! 2. **Preprocessing** – normalize, optionally denoise, handle transparency
-//! 3. **Segmentation** – reduce colors via median-cut quantization
+//! 3. **Segmentation** – reduce colors via median-cut quantization with deterministic
+//!    palette refinement, anti-aliased fringe cleanup, and adaptive flat-art palette capping
 //! 4. **Contour extraction** – trace deterministic grid-edge loops with hole preservation
 //! 5. **Simplification** – reduce polygon complexity with Ramer-Douglas-Peucker
 //! 6. **Contour smoothing + curve fitting** – adaptively smooth closed contours,
@@ -125,8 +126,9 @@ mod tests {
     fn tracer_high_preset() {
         let tracer = Tracer::with_preset(QualityPreset::High);
         let config = tracer.config();
-        assert_eq!(config.color_count, 32);
+        assert_eq!(config.color_count, 64);
         assert!(config.enable_denoising);
+        assert!(config.corner_sensitivity > TracingConfig::default().corner_sensitivity);
     }
 
     #[test]

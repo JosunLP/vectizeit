@@ -31,7 +31,7 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (33 tests)
+│   │       └── integration_tests.rs  # API & golden tests (37 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
@@ -66,12 +66,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **114 automated tests** across four categories:
+The project includes **129 automated tests** across four categories:
 
 | Category          | Location                                      | Tests |
 | ----------------- | --------------------------------------------- | ----- |
-| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 62    |
-| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 34    |
+| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 74    |
+| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 37    |
 | CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17    |
 | Doc tests         | `crates/vectize/src/lib.rs`                   | 1     |
 
@@ -244,8 +244,8 @@ The library processes images in eight sequential stages:
 | Stage           | Module                              | Description                                                                                                                                                                                                                                                                                                                                            |
 | --------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 1. Load         | `pipeline::loader`                  | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header.                                                                                                                                                                                                                                    |
-| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), and composite transparent pixels against a white background.                                                                                                                                                       |
-| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization**. Each pixel is assigned the index of its nearest palette entry in RGB space.                                                                                                                                                                                                        |
+| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 edge-aware Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), optionally resample to a denser tracing grid for higher-fidelity presets, and composite transparent pixels against a white background.                                                             |
+| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization** seeded with deterministic palette-refinement passes. The segmenter collapses anti-aliased bridge shades, compacts unused palette entries, and adaptively caps flat-art traces to a smaller internal palette when a long tail of tiny colors would otherwise over-segment simple graphics. |
 | 4. Contour      | `pipeline::contour`                 | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. Incomplete or otherwise invalid loops are discarded before downstream processing and reported through stage metrics for diagnostics.                                                                                                  |
 | 5. Despeckle    | `pipeline::mod`                     | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles.                                                                                                                                                                                                                                      |
 | 6. Simplify     | `pipeline::simplify`                | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness.                                                                                                                                                                                                             |
@@ -266,6 +266,11 @@ stay inside the final SVG viewBox.
 Structured stage metrics also report contours simplified away during SVG preparation,
 contours filtered by `min_region_area`, and contours suppressed as redundant background.
 
+When using the `high` preset, tracing runs on an internal **2× resampled grid** and maps the
+resulting geometry back into the original SVG viewBox. This improves edge placement and retains
+more small features, while the segmentation stage now automatically caps flat graphics to a
+smaller internal palette when a large color budget would only preserve anti-aliased fringe shades.
+
 ---
 
 ## Configuration Reference
@@ -279,7 +284,7 @@ contours filtered by `min_region_area`, and contours suppressed as redundant bac
 | `corner_sensitivity`       | `f64`  | `0.6`   | Corner preservation strength for adaptive smoothing and Bezier fitting |
 | `alpha_threshold`          | `u8`   | `128`   | Pixels below this alpha are transparent                                |
 | `despeckle_threshold`      | `f64`  | `2.0`   | Minimum contour perimeter                                              |
-| `enable_denoising`         | `bool` | `false` | Apply Gaussian blur before tracing                                     |
+| `enable_denoising`         | `bool` | `false` | Apply edge-aware Gaussian blur before tracing                          |
 | `enable_preprocessing`     | `bool` | `true`  | Enable normalization stage                                             |
 
 ### Quality Presets
@@ -288,7 +293,13 @@ contours filtered by `min_region_area`, and contours suppressed as redundant bac
 | ---------- | ------ | --------- | --------- | -------------------------- |
 | `fast`     | 8      | 2.0       | off       | Quick previews, low detail |
 | `balanced` | 16     | 1.0       | off       | General-purpose (default)  |
-| `high`     | 32     | 0.3       | on        | Maximum fidelity           |
+| `high`     | 64*    | 1.2       | on        | Maximum fidelity           |
+
+`*` The `high` preset still accepts up to 64 colors, but simple flat graphics are internally
+capped to a smaller palette when the extra buckets would mostly preserve anti-aliased edge shades
+instead of meaningful regions. Because `high` traces on an internal 2× grid, the `1.2` tolerance
+still corresponds to a tighter effective output-space simplification than the default `balanced`
+preset.
 
 ---
 
@@ -312,9 +323,10 @@ contours filtered by `min_region_area`, and contours suppressed as redundant bac
   still produce slightly blocky results even at high quality settings.
 - **No path merging.** Adjacent regions of the same color from different quantization buckets
   are emitted as separate paths rather than being merged.
-- **Median-cut quantization** can sometimes split perceptually similar colors and merge
-  distinct ones compared to perceptual quantizers (e.g. neuquant). It is fast and
-  deterministic, which makes it suitable for a library.
+- **Median-cut quantization** is improved with deterministic refinement, but it can still
+  split perceptually similar colors and merge distinct ones compared to stronger
+  perceptual quantizers (e.g. neuquant). The current approach stays fast and deterministic,
+  which makes it suitable for a library.
 - **No streaming input.** The entire image is loaded into memory before processing begins.
 - **WebP encoding is not supported** — only decoding. The output is always SVG.
 

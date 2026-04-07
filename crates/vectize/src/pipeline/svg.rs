@@ -101,6 +101,18 @@ pub(crate) fn generate_svg_with_metrics(
     height: u32,
     config: &TracingConfig,
 ) -> SvgBuildResult {
+    generate_svg_with_trace_space(regions, width, height, width, height, 1.0, config)
+}
+
+pub(crate) fn generate_svg_with_trace_space(
+    regions: &[ColorRegion],
+    trace_width: u32,
+    trace_height: u32,
+    output_width: u32,
+    output_height: u32,
+    coordinate_scale: f64,
+    config: &TracingConfig,
+) -> SvgBuildResult {
     let mut svg = String::new();
     let mut metrics = SvgEmissionMetrics::default();
     let ordered_regions = order_regions_for_emission(regions);
@@ -111,13 +123,13 @@ pub(crate) fn generate_svg_with_metrics(
     // SVG header
     svg.push_str(&format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<svg xmlns="http://www.w3.org/2000/svg" width="{output_width}" height="{output_height}" viewBox="0 0 {output_width} {output_height}">
 "#
     ));
 
     // Background rectangle with configured color
     svg.push_str(&format!(
-        r#"  <rect width="{width}" height="{height}" fill="{bg_fill}"/>
+        r#"  <rect width="{output_width}" height="{output_height}" fill="{bg_fill}"/>
 "#
     ));
 
@@ -127,7 +139,15 @@ pub(crate) fn generate_svg_with_metrics(
 
         let hex = region.color.to_hex();
 
-        let region_result = build_region_paths(region, width, height, config);
+        let region_result = build_region_paths(
+            region,
+            trace_width,
+            trace_height,
+            output_width,
+            output_height,
+            coordinate_scale,
+            config,
+        );
         metrics.contours_suppressed_background += region_result.contours_suppressed_background;
 
         for path_result in region_result.paths {
@@ -178,11 +198,14 @@ fn order_regions_for_emission(regions: &[ColorRegion]) -> Vec<OrderedRegion<'_>>
 
 fn build_region_paths(
     region: &ColorRegion,
-    width: u32,
-    height: u32,
+    trace_width: u32,
+    trace_height: u32,
+    output_width: u32,
+    output_height: u32,
+    coordinate_scale: f64,
     config: &TracingConfig,
 ) -> RegionBuildResult {
-    let plan = region_path_groups(region, width, height, config);
+    let plan = region_path_groups(region, trace_width, trace_height, config);
 
     RegionBuildResult {
         paths: plan
@@ -192,8 +215,9 @@ fn build_region_paths(
                 build_path_data_from_indices(
                     &region.contours,
                     &contour_indices,
-                    width,
-                    height,
+                    output_width,
+                    output_height,
+                    coordinate_scale,
                     config,
                 )
             })
@@ -471,8 +495,9 @@ fn point_in_polygon(contour: &Contour, point: (f64, f64)) -> bool {
 fn build_path_data_from_indices(
     contours: &[Contour],
     contour_indices: &[usize],
-    width: u32,
-    height: u32,
+    output_width: u32,
+    output_height: u32,
+    coordinate_scale: f64,
     config: &TracingConfig,
 ) -> PathBuildResult {
     let mut parts = Vec::new();
@@ -495,7 +520,7 @@ fn build_path_data_from_indices(
         // proportional to the configured strength.
         let float_pts: Vec<(f64, f64)> = simplified
             .iter()
-            .map(|p| (p.x as f64, p.y as f64))
+            .map(|p| (p.x as f64 * coordinate_scale, p.y as f64 * coordinate_scale))
             .collect();
         let smoothed = if config.smoothing_strength > 0.01 {
             // Derive iteration count from strength: low strength => 1 pass,
@@ -524,12 +549,12 @@ fn build_path_data_from_indices(
                 &smoothed,
                 config.smoothing_strength,
                 config.corner_sensitivity,
-                width,
-                height,
+                output_width,
+                output_height,
             )
         } else {
             // Use straight line segments
-            build_linear_path(&smoothed, width, height)
+            build_linear_path(&smoothed, output_width, output_height)
         };
 
         parts.push(geometry.data);
@@ -807,6 +832,32 @@ mod tests {
     }
 
     #[test]
+    fn generate_svg_with_trace_space_maps_internal_coordinates_back_to_output_space() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.0,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![vec![
+                Point::new(0, 0),
+                Point::new(5, 0),
+                Point::new(5, 5),
+                Point::new(0, 5),
+            ]],
+        }];
+
+        let result = generate_svg_with_trace_space(&regions, 6, 6, 3, 3, 0.5, &config);
+
+        assert!(result.svg.contains(r#"viewBox="0 0 3 3""#));
+        assert!(result
+            .svg
+            .contains("M 0.00 0.00 L 2.50 0.00 L 2.50 2.50 L 0.00 2.50 Z"));
+    }
+
+    #[test]
     fn generate_svg_emits_larger_regions_before_smaller_details() {
         let config = crate::config::TracingConfig {
             smoothing_strength: 0.0,
@@ -1028,7 +1079,7 @@ mod tests {
             Point::new(1, 1),
         ]];
 
-        let result = build_path_data_from_indices(&contours, &[0], 4, 4, &config);
+        let result = build_path_data_from_indices(&contours, &[0], 4, 4, 1.0, &config);
 
         assert!(result.data.is_empty());
         assert_eq!(result.contours_emitted, 0);

@@ -929,6 +929,114 @@ fn different_presets_produce_different_output() {
     );
 }
 
+#[test]
+fn high_preset_preserves_more_color_detail_than_balanced_on_gradients() {
+    let img = ImageBuffer::from_fn(32, 32, |x, y| {
+        let r = ((x as f64 / 31.0) * 255.0) as u8;
+        let g = ((y as f64 / 31.0) * 255.0) as u8;
+        let b = (((x + y) as f64 / 62.0) * 255.0) as u8;
+        Rgba([r, g, b, 255])
+    });
+    let bytes = encode_png(&img);
+
+    let balanced = Tracer::with_preset(QualityPreset::Balanced)
+        .trace_bytes_result(&bytes)
+        .unwrap();
+    let high = Tracer::with_preset(QualityPreset::High)
+        .trace_bytes_result(&bytes)
+        .unwrap();
+
+    assert!(
+        high.debug().palette().len() > balanced.debug().palette().len(),
+        "high preset should retain a richer palette for detailed gradients"
+    );
+    assert!(
+        high.svg().len() > balanced.svg().len(),
+        "high preset should emit more geometric detail for detailed gradients"
+    );
+}
+
+#[test]
+fn trace_bytes_result_preserves_small_accent_palette_color() {
+    let img = ImageBuffer::from_fn(12, 12, |_, y| {
+        if y == 0 {
+            Rgba([224, 16, 16, 255])
+        } else {
+            Rgba([24, 16, 16, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+        background_color: None,
+    };
+
+    let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
+
+    assert!(
+        result.debug().palette().iter().any(|color| color.r <= 40),
+        "the majority base tone should remain in the quantized palette"
+    );
+    assert!(
+        result.debug().palette().iter().any(|color| color.r >= 200),
+        "the small accent tone should remain in the quantized palette"
+    );
+}
+
+#[test]
+fn trace_bytes_result_collapses_antialias_bridge_palette_color_for_flat_art() {
+    let bridge = Rgba([128, 64, 0, 255]);
+    let img = ImageBuffer::from_fn(16, 16, |x, y| {
+        let diagonal = x + y;
+
+        if diagonal < 14 {
+            Rgba([0, 0, 0, 255])
+        } else if diagonal == 14 {
+            bridge
+        } else {
+            Rgba([255, 128, 0, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 3,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.9,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: false,
+        quality_preset: QualityPreset::Balanced,
+        background_color: None,
+    };
+
+    let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
+
+    assert_eq!(
+        result.debug().palette().len(),
+        2,
+        "flat-art antialias bridge shades should collapse into the endpoint palette"
+    );
+    assert_eq!(
+        result.svg().matches("<path").count(),
+        2,
+        "collapsing bridge shades should prevent extra contour bands"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Error Type Tests
 // ---------------------------------------------------------------------------

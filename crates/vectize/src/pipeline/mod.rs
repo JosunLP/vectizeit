@@ -6,7 +6,8 @@
 //!
 //! 1. **Preprocessing** – normalize to RGBA8, optionally denoise
 //! 2. **Alpha compositing** – composite transparent pixels against white
-//! 3. **Color quantization** – median-cut palette reduction
+//! 3. **Color quantization** – median-cut palette reduction with deterministic refinement,
+//!    anti-aliased fringe cleanup, and adaptive flat-art palette capping
 //! 4. **Contour extraction** – deterministic grid-edge tracing with hole preservation
 //! 5. **Despeckle** – remove tiny contours below the threshold
 //! 6. **Region assembly** – build color regions from contour data
@@ -24,12 +25,14 @@ pub mod svg;
 use image::DynamicImage;
 use log::debug;
 
-use crate::config::TracingConfig;
+use crate::config::{QualityPreset, TracingConfig};
 use crate::error::Result;
 use crate::result::{TraceDebugInfo, TraceStageMetrics, TracedRegionSummary, TracingResult};
 
 use self::contour::{contour_is_hole, Contour};
-use self::svg::{generate_svg_with_metrics, ColorRegion};
+use self::svg::{generate_svg_with_metrics, generate_svg_with_trace_space, ColorRegion};
+
+const HIGH_PRECISION_TRACE_SCALE: u32 = 2;
 
 /// Run the complete vectorization pipeline on a decoded image.
 ///
@@ -43,10 +46,12 @@ pub fn run_pipeline_with_debug(
     img: &DynamicImage,
     config: &TracingConfig,
 ) -> Result<TracingResult> {
+    let output_width = img.width();
+    let output_height = img.height();
+
     debug!(
         "Pipeline: preprocessing image ({}×{})",
-        img.width(),
-        img.height()
+        output_width, output_height
     );
 
     // Stage 1: Preprocessing (normalization, optional denoising)
@@ -57,12 +62,23 @@ pub fn run_pipeline_with_debug(
     let composited =
         preprocess::composite_against_background(&preprocessed, config.alpha_threshold, bg);
 
+    let trace_scale = tracing_scale(config);
+    let trace_image = if trace_scale > 1 {
+        debug!(
+            "Pipeline: resampling image to a {}× tracing grid for higher precision",
+            trace_scale
+        );
+        preprocess::resample_for_tracing(&composited, trace_scale)
+    } else {
+        composited
+    };
+
     // Stage 3: Color quantization / segmentation
     debug!(
         "Pipeline: quantizing colors (target: {})",
         config.color_count
     );
-    let segmentation = segment::quantize(&composited, config.color_count, config.alpha_threshold);
+    let segmentation = segment::quantize(&trace_image, config.color_count, config.alpha_threshold);
 
     // Stage 4: Contour extraction
     debug!("Pipeline: extracting contours");
@@ -77,8 +93,8 @@ pub fn run_pipeline_with_debug(
     let despeckled_metrics = summarize_contours(&contour_groups);
 
     // Stage 6: Build color regions for SVG generation
-    let width = segmentation.width;
-    let height = segmentation.height;
+    let trace_width = segmentation.width;
+    let trace_height = segmentation.height;
 
     let regions: Vec<ColorRegion> = contour_groups
         .into_iter()
@@ -109,7 +125,19 @@ pub fn run_pipeline_with_debug(
             })
             .collect(),
     );
-    let svg_result = generate_svg_with_metrics(&regions, width, height, config);
+    let svg_result = if trace_scale > 1 {
+        generate_svg_with_trace_space(
+            &regions,
+            trace_width,
+            trace_height,
+            output_width,
+            output_height,
+            1.0 / trace_scale as f64,
+            config,
+        )
+    } else {
+        generate_svg_with_metrics(&regions, trace_width, trace_height, config)
+    };
     let stage_metrics = TraceStageMetrics::with_svg_diagnostics(
         extracted_metrics.contours,
         extracted_metrics.holes,
@@ -129,11 +157,19 @@ pub fn run_pipeline_with_debug(
 
     Ok(TracingResult::with_stage_metrics(
         svg_result.svg,
-        width,
-        height,
+        output_width,
+        output_height,
         debug,
         stage_metrics,
     ))
+}
+
+fn tracing_scale(config: &TracingConfig) -> u32 {
+    if matches!(config.quality_preset, QualityPreset::High) {
+        HIGH_PRECISION_TRACE_SCALE
+    } else {
+        1
+    }
 }
 
 /// Remove contours whose perimeter is below the despeckle threshold.
@@ -261,5 +297,11 @@ mod tests {
         assert_eq!(summary.contours, 2);
         assert_eq!(summary.holes, 1);
         assert_eq!(summary.points, 8);
+    }
+
+    #[test]
+    fn tracing_scale_uses_dense_grid_for_high_preset() {
+        assert_eq!(tracing_scale(&QualityPreset::Balanced.to_config()), 1);
+        assert_eq!(tracing_scale(&QualityPreset::High.to_config()), 2);
     }
 }
