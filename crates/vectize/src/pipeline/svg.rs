@@ -6,9 +6,9 @@
 
 use rayon::prelude::*;
 
-use crate::config::TracingConfig;
+use crate::config::{QualityPreset, TracingConfig};
 use crate::pipeline::contour::{contour_is_hole, signed_area, Contour, Point};
-use crate::pipeline::curves::{fit_closed_cubic_beziers_f64, CubicBezier};
+use crate::pipeline::curves::{corner_cosine, fit_closed_cubic_beziers_f64, CubicBezier};
 use crate::pipeline::gradient::{SvgGradientKind, SvgGradientPaintMap};
 use crate::pipeline::segment::PaletteColor;
 use crate::pipeline::simplify::{simplify_closed, simplify_closed_f64};
@@ -68,6 +68,13 @@ struct ContourGeometryProfile {
     prefer_linear: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ContourEdgeProfile {
+    point_density: f64,
+    polygonal_factor: f64,
+    staircase_factor: f64,
+}
+
 #[derive(Clone, Copy)]
 struct OrderedRegion<'a> {
     index: usize,
@@ -111,6 +118,17 @@ const MIN_SEAM_STROKE_THICKNESS_PX: f64 = 4.5;
 const FULL_SEAM_STROKE_THICKNESS_PX: f64 = 12.0;
 const MIN_SEAM_STROKE_CENTI_PX: f64 = 8.0;
 const MAX_SEAM_STROKE_CENTI_PX: f64 = 20.0;
+const SHARP_CORNER_COS_THRESHOLD: f64 = 0.35;
+const POLYGONAL_POINT_DENSITY_LOW: f64 = 0.05;
+const POLYGONAL_POINT_DENSITY_HIGH: f64 = 0.14;
+const STAIRCASE_POINT_DENSITY_LOW: f64 = 0.12;
+const STAIRCASE_POINT_DENSITY_HIGH: f64 = 0.28;
+const HIGH_POLYGONAL_SMOOTHING_REDUCTION_MAX: f64 = 0.55;
+const HIGH_STAIRCASE_SMOOTHING_REDUCTION_MAX: f64 = 0.18;
+const HIGH_BASE_SEAM_BONUS_CENTI_PX: f64 = 6.0;
+const HIGH_STAIRCASE_SEAM_BONUS_CENTI_PX: f64 = 10.0;
+const HIGH_POLYGONAL_LINEAR_FACTOR_MIN: f64 = 0.85;
+const HIGH_POLYGONAL_LINEAR_POINT_DENSITY_MAX: f64 = 0.06;
 const OUTLINE_COLOR_LUMA_MAX: f64 = 42.0;
 const OUTLINE_COLOR_CHROMA_MAX: u8 = 20;
 
@@ -859,6 +877,11 @@ fn contour_geometry_profile(
     config: &TracingConfig,
 ) -> ContourGeometryProfile {
     let thickness = contour_visual_thickness(points);
+    let high_detail_edge_profile = if matches!(config.quality_preset, QualityPreset::High) {
+        contour_edge_profile(points)
+    } else {
+        ContourEdgeProfile::default()
+    };
     let smoothing_factor = remap_clamped(
         thickness,
         THIN_CONTOUR_THICKNESS_PX,
@@ -874,17 +897,36 @@ fn contour_geometry_profile(
             0.0,
             1.0,
         );
+    let high_detail_smoothing_factor = (1.0
+        - (high_detail_edge_profile.polygonal_factor * HIGH_POLYGONAL_SMOOTHING_REDUCTION_MAX)
+        - (high_detail_edge_profile.staircase_factor * HIGH_STAIRCASE_SMOOTHING_REDUCTION_MAX))
+        .clamp(0.2, 1.0);
+    let smoothing_strength = config.smoothing_strength * smoothing_factor * high_detail_smoothing_factor;
+    let corner_bias = (line_like_factor * 0.9)
+        + (high_detail_edge_profile.polygonal_factor * 0.75)
+        + (high_detail_edge_profile.staircase_factor * 0.35);
+    let seam_bonus_centi_px = if matches!(config.quality_preset, QualityPreset::High) {
+        HIGH_BASE_SEAM_BONUS_CENTI_PX
+            + (high_detail_edge_profile.staircase_factor * HIGH_STAIRCASE_SEAM_BONUS_CENTI_PX)
+    } else {
+        0.0
+    };
 
     ContourGeometryProfile {
-        smoothing_strength: config.smoothing_strength * smoothing_factor,
+        smoothing_strength,
         corner_sensitivity: (config.corner_sensitivity
-            + ((1.0 - config.corner_sensitivity) * line_like_factor * 0.9))
+            + ((1.0 - config.corner_sensitivity) * corner_bias.clamp(0.0, 1.0)))
             .clamp(0.0, 1.0),
         seam_stroke_width_centi_px: seam_stroke_width_centi_px(
             thickness,
-            config.smoothing_strength,
+            smoothing_strength,
+            seam_bonus_centi_px,
         ),
-        prefer_linear: thickness <= LINEAR_CONTOUR_THICKNESS_PX,
+        prefer_linear: thickness <= LINEAR_CONTOUR_THICKNESS_PX
+            || (matches!(config.quality_preset, QualityPreset::High)
+                && high_detail_edge_profile.polygonal_factor >= HIGH_POLYGONAL_LINEAR_FACTOR_MIN
+                && high_detail_edge_profile.point_density
+                    <= HIGH_POLYGONAL_LINEAR_POINT_DENSITY_MAX),
     }
 }
 
@@ -896,20 +938,88 @@ fn effective_seam_stroke_width_centi_px(color: PaletteColor, seam_stroke_width_c
     }
 }
 
-fn seam_stroke_width_centi_px(thickness: f64, smoothing_strength: f64) -> u8 {
+fn seam_stroke_width_centi_px(
+    thickness: f64,
+    smoothing_strength: f64,
+    seam_bonus_centi_px: f64,
+) -> u8 {
     if smoothing_strength <= 0.01 || thickness <= MIN_SEAM_STROKE_THICKNESS_PX {
         return 0;
     }
 
-    remap_clamped(
+    let base_width = remap_clamped(
         thickness,
         MIN_SEAM_STROKE_THICKNESS_PX,
         FULL_SEAM_STROKE_THICKNESS_PX,
         MIN_SEAM_STROKE_CENTI_PX,
         MAX_SEAM_STROKE_CENTI_PX,
-    )
+    );
+    (base_width + seam_bonus_centi_px)
     .round()
     .clamp(0.0, u8::MAX as f64) as u8
+}
+
+fn contour_edge_profile(points: &[(f64, f64)]) -> ContourEdgeProfile {
+    let perimeter = polygon_perimeter_f64(points);
+    if points.len() < 3 || perimeter <= f64::EPSILON {
+        return ContourEdgeProfile::default();
+    }
+
+    let point_density = points.len() as f64 / perimeter;
+    let sharp_corner_ratio = contour_sharp_corner_ratio(points);
+    let polygonal_factor = sharp_corner_ratio
+        * (1.0
+            - remap_clamped(
+                point_density,
+                POLYGONAL_POINT_DENSITY_LOW,
+                POLYGONAL_POINT_DENSITY_HIGH,
+                0.0,
+                1.0,
+            ));
+    let staircase_factor = sharp_corner_ratio
+        * remap_clamped(
+            point_density,
+            STAIRCASE_POINT_DENSITY_LOW,
+            STAIRCASE_POINT_DENSITY_HIGH,
+            0.0,
+            1.0,
+        );
+
+    ContourEdgeProfile {
+        point_density,
+        polygonal_factor: polygonal_factor.clamp(0.0, 1.0),
+        staircase_factor: staircase_factor.clamp(0.0, 1.0),
+    }
+}
+
+fn contour_sharp_corner_ratio(points: &[(f64, f64)]) -> f64 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+
+    let mut sharp_corners = 0usize;
+    let mut measured_corners = 0usize;
+
+    for index in 0..points.len() {
+        let previous = points[(index + points.len() - 1) % points.len()];
+        let current = points[index];
+        let next = points[(index + 1) % points.len()];
+
+        let Some(cos_angle) = corner_cosine(previous, current, next) else {
+            continue;
+        };
+
+        measured_corners += 1;
+        if cos_angle <= SHARP_CORNER_COS_THRESHOLD {
+            sharp_corners += 1;
+        }
+    }
+
+    if measured_corners == 0 {
+        0.0
+    } else {
+        sharp_corners as f64 / measured_corners as f64
+    }
 }
 
 fn seam_stroke_attributes(
@@ -1787,9 +1897,49 @@ mod tests {
     }
 
     #[test]
+    fn high_preset_polygonal_regions_reduce_smoothing_and_prefer_linear() {
+        let config = crate::config::QualityPreset::High.to_config();
+        let polygonal = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+        let organic = vec![
+            (0.0, 10.0),
+            (4.0, 2.0),
+            (12.0, 0.0),
+            (19.0, 4.0),
+            (20.0, 12.0),
+            (16.0, 19.0),
+            (8.0, 20.0),
+            (1.0, 16.0),
+        ];
+
+        let polygonal_profile = contour_geometry_profile(&polygonal, &config);
+        let organic_profile = contour_geometry_profile(&organic, &config);
+
+        assert!(polygonal_profile.smoothing_strength < organic_profile.smoothing_strength);
+        assert!(polygonal_profile.corner_sensitivity > organic_profile.corner_sensitivity);
+        assert!(polygonal_profile.prefer_linear);
+        assert!(!organic_profile.prefer_linear);
+    }
+
+    #[test]
+    fn high_preset_applies_broader_seam_closing_than_balanced() {
+        let balanced = crate::config::TracingConfig {
+            smoothing_strength: 0.35,
+            ..crate::config::TracingConfig::default()
+        };
+        let high = crate::config::QualityPreset::High.to_config();
+        let broad = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+
+        let balanced_profile = contour_geometry_profile(&broad, &balanced);
+        let high_profile = contour_geometry_profile(&broad, &high);
+
+        assert!(high_profile.seam_stroke_width_centi_px > balanced_profile.seam_stroke_width_centi_px);
+    }
+
+    #[test]
     fn seam_stroke_width_skips_thin_regions() {
-        assert_eq!(seam_stroke_width_centi_px(2.0, 0.4), 0);
-        assert!(seam_stroke_width_centi_px(10.0, 0.4) > 0);
+        assert_eq!(seam_stroke_width_centi_px(2.0, 0.4, 0.0), 0);
+        assert!(seam_stroke_width_centi_px(10.0, 0.4, 0.0) > 0);
+        assert!(seam_stroke_width_centi_px(10.0, 0.4, 10.0) > seam_stroke_width_centi_px(10.0, 0.4, 0.0));
     }
 
     #[test]
