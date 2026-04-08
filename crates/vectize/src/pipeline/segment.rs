@@ -279,13 +279,15 @@ fn quantize_with_budget(
     let pixel_source = SlicePixelSource { pixels };
     cleanup_antialias_fringes(&pixel_source, &mut labels, &palette, width, height);
     collapse_bridge_palette_labels(&pixel_source, &mut labels, &palette, width, height);
+    let tiny_component_area_threshold =
+        tiny_component_cleanup_area_threshold(config, palette.len(), &labels);
     cleanup_tiny_label_components(
         &pixel_source,
         &mut labels,
         &palette,
         width,
         height,
-        tiny_component_cleanup_area_threshold(config, palette.len()),
+        tiny_component_area_threshold,
     );
     let compact_palette = compact_palette(&mut labels, &palette);
     let palette_colors: Vec<PaletteColor> = compact_palette
@@ -320,13 +322,15 @@ fn quantize_tiled_with_budget(
 
     cleanup_antialias_fringes(&pixel_source, &mut labels, &palette, width, height);
     collapse_bridge_palette_labels(&pixel_source, &mut labels, &palette, width, height);
+    let tiny_component_area_threshold =
+        tiny_component_cleanup_area_threshold(config, palette.len(), &labels);
     cleanup_tiny_label_components(
         &pixel_source,
         &mut labels,
         &palette,
         width,
         height,
-        tiny_component_cleanup_area_threshold(config, palette.len()),
+        tiny_component_area_threshold,
     );
 
     let compact_palette = compact_palette(&mut labels, &palette);
@@ -343,12 +347,18 @@ fn quantize_tiled_with_budget(
     }
 }
 
-fn tiny_component_cleanup_area_threshold(config: &TracingConfig, palette_len: usize) -> usize {
+fn tiny_component_cleanup_area_threshold(
+    config: &TracingConfig,
+    palette_len: usize,
+    labels: &[u8],
+) -> usize {
     if matches!(config.quality_preset, QualityPreset::High)
         && config.enable_preprocessing
         && config.enable_denoising
         && config.color_count >= 32
         && palette_len >= HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN
+        && !labels.is_empty()
+        && flat_art_rerun_cap(labels, palette_len).is_none()
     {
         HIGH_DETAIL_TINY_COMPONENT_MAX_AREA
     } else {
@@ -1568,10 +1578,34 @@ mod tests {
     fn tiny_component_cleanup_threshold_only_applies_to_rich_high_detail_configs() {
         let high = QualityPreset::High.to_config();
         let balanced = QualityPreset::Balanced.to_config();
+        let rich_labels = (0u8..32)
+            .flat_map(|label| std::iter::repeat_n(label, 16))
+            .collect::<Vec<_>>();
 
-        assert_eq!(tiny_component_cleanup_area_threshold(&high, 24), 32);
-        assert_eq!(tiny_component_cleanup_area_threshold(&high, 8), 0);
-        assert_eq!(tiny_component_cleanup_area_threshold(&balanced, 24), 0);
+        let mut flat_art_labels = Vec::new();
+        for label in 0u8..24 {
+            flat_art_labels.extend(std::iter::repeat_n(label, 30));
+        }
+        for label in 24u8..44 {
+            flat_art_labels.push(label);
+        }
+
+        assert_eq!(
+            tiny_component_cleanup_area_threshold(&high, 32, &rich_labels),
+            32
+        );
+        assert_eq!(
+            tiny_component_cleanup_area_threshold(&high, 44, &flat_art_labels),
+            0
+        );
+        assert_eq!(
+            tiny_component_cleanup_area_threshold(&high, 8, &rich_labels),
+            0
+        );
+        assert_eq!(
+            tiny_component_cleanup_area_threshold(&balanced, 32, &rich_labels),
+            0
+        );
     }
 
     #[test]

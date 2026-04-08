@@ -901,7 +901,8 @@ fn contour_geometry_profile(
         - (high_detail_edge_profile.polygonal_factor * HIGH_POLYGONAL_SMOOTHING_REDUCTION_MAX)
         - (high_detail_edge_profile.staircase_factor * HIGH_STAIRCASE_SMOOTHING_REDUCTION_MAX))
         .clamp(0.2, 1.0);
-    let smoothing_strength = config.smoothing_strength * smoothing_factor * high_detail_smoothing_factor;
+    let smoothing_strength =
+        config.smoothing_strength * smoothing_factor * high_detail_smoothing_factor;
     let corner_bias = (line_like_factor * 0.9)
         + (high_detail_edge_profile.polygonal_factor * 0.75)
         + (high_detail_edge_profile.staircase_factor * 0.35);
@@ -916,7 +917,7 @@ fn contour_geometry_profile(
         smoothing_strength,
         corner_sensitivity: (config.corner_sensitivity
             + ((1.0 - config.corner_sensitivity) * corner_bias.clamp(0.0, 1.0)))
-            .clamp(0.0, 1.0),
+        .clamp(0.0, 1.0),
         seam_stroke_width_centi_px: seam_stroke_width_centi_px(
             thickness,
             smoothing_strength,
@@ -955,8 +956,8 @@ fn seam_stroke_width_centi_px(
         MAX_SEAM_STROKE_CENTI_PX,
     );
     (base_width + seam_bonus_centi_px)
-    .round()
-    .clamp(0.0, u8::MAX as f64) as u8
+        .round()
+        .clamp(0.0, u8::MAX as f64) as u8
 }
 
 fn contour_edge_profile(points: &[(f64, f64)]) -> ContourEdgeProfile {
@@ -1932,14 +1933,19 @@ mod tests {
         let balanced_profile = contour_geometry_profile(&broad, &balanced);
         let high_profile = contour_geometry_profile(&broad, &high);
 
-        assert!(high_profile.seam_stroke_width_centi_px > balanced_profile.seam_stroke_width_centi_px);
+        assert!(
+            high_profile.seam_stroke_width_centi_px > balanced_profile.seam_stroke_width_centi_px
+        );
     }
 
     #[test]
     fn seam_stroke_width_skips_thin_regions() {
         assert_eq!(seam_stroke_width_centi_px(2.0, 0.4, 0.0), 0);
         assert!(seam_stroke_width_centi_px(10.0, 0.4, 0.0) > 0);
-        assert!(seam_stroke_width_centi_px(10.0, 0.4, 10.0) > seam_stroke_width_centi_px(10.0, 0.4, 0.0));
+        assert!(
+            seam_stroke_width_centi_px(10.0, 0.4, 10.0)
+                > seam_stroke_width_centi_px(10.0, 0.4, 0.0)
+        );
     }
 
     #[test]

@@ -47,6 +47,15 @@ const ADAPTIVE_HIGH_DETAIL_TRACE_PIXELS_PER_CONTOUR: u64 = 320;
 const ADAPTIVE_HIGH_DETAIL_PALETTE_MIN: usize = 16;
 const ADAPTIVE_HIGH_DETAIL_COLOR_COUNT_MIN: u16 = 32;
 
+/// Reference area (256×256 px) for resolution-adaptive parameter scaling.
+const ADAPTIVE_SCALE_REFERENCE_AREA: f64 = 65_536.0;
+/// Maximum scale factor applied to the despeckle perimeter threshold.
+const ADAPTIVE_DESPECKLE_SCALE_MAX: f64 = 8.0;
+/// Maximum scale factor applied to the SVG minimum region area.
+const ADAPTIVE_SVG_AREA_SCALE_MAX: f64 = 6.0;
+/// Maximum scale factor applied to the polygon simplification tolerance.
+const ADAPTIVE_TOLERANCE_SCALE_MAX: f64 = 2.5;
+
 /// Run the complete vectorization pipeline on a decoded image.
 ///
 /// Returns the SVG as a `String`.
@@ -122,11 +131,12 @@ pub(crate) fn run_pipeline_with_debug_and_progress(
     tracker.advance(TraceStage::ContoursExtracted);
     let extracted_metrics = summarize_contours(&contour_extraction.contour_groups);
 
-    // Stage 5: Despeckle – remove tiny contours below perimeter threshold
-    let contour_groups = despeckle(
-        contour_extraction.contour_groups,
-        config.despeckle_threshold,
-    );
+    // Stage 5: Despeckle – remove tiny contours below perimeter threshold.
+    // Use a resolution-adaptive threshold so large, photo-like images don't
+    // produce thousands of tiny noise fragments.
+    let effective_despeckle =
+        adaptive_resolution_despeckle_threshold(config, segmentation.width, segmentation.height);
+    let contour_groups = despeckle(contour_extraction.contour_groups, effective_despeckle);
     tracker.advance(TraceStage::Despeckled);
     let despeckled_metrics = summarize_contours(&contour_groups);
 
@@ -148,6 +158,29 @@ pub(crate) fn run_pipeline_with_debug_and_progress(
             effective_min_region_area,
         );
         svg_config.min_region_area = effective_min_region_area;
+    }
+
+    // Resolution-adaptive SVG floor and tolerance for non-High presets.
+    // Scales up min_region_area and simplification_tolerance proportionally to
+    // sqrt(image_area / reference_area) so large images don't flood the SVG
+    // with sub-pixel noise fragments.
+    let resolution_area_floor =
+        adaptive_resolution_min_region_area(config, trace_width, trace_height);
+    if resolution_area_floor > svg_config.min_region_area {
+        debug!(
+            "Pipeline: raising SVG min_region_area from {:.2} to {:.2} for {}×{} image",
+            svg_config.min_region_area, resolution_area_floor, trace_width, trace_height,
+        );
+        svg_config.min_region_area = resolution_area_floor;
+    }
+    let resolution_tolerance =
+        adaptive_resolution_simplification_tolerance(config, trace_width, trace_height);
+    if resolution_tolerance > svg_config.simplification_tolerance {
+        debug!(
+            "Pipeline: raising simplification tolerance from {:.2} to {:.2} for {}×{} image",
+            svg_config.simplification_tolerance, resolution_tolerance, trace_width, trace_height,
+        );
+        svg_config.simplification_tolerance = resolution_tolerance;
     }
 
     let regions: Vec<ColorRegion> = contour_groups
@@ -281,6 +314,69 @@ fn should_raise_high_detail_min_region_area(
 fn uses_default_high_min_region_area(config: &TracingConfig) -> bool {
     let default_high = QualityPreset::High.to_config();
     (config.min_region_area - default_high.min_region_area).abs() <= f64::EPSILON
+}
+
+/// Resolution scale factor: `sqrt(trace_area / ADAPTIVE_SCALE_REFERENCE_AREA)`,
+/// clamped to `[1.0, max_scale]`.
+///
+/// Returns 1.0 for images at or below the reference resolution so that small
+/// images are unaffected.
+#[inline]
+fn adaptive_resolution_scale(trace_width: u32, trace_height: u32, max_scale: f64) -> f64 {
+    let area = f64::from(trace_width) * f64::from(trace_height);
+    (area / ADAPTIVE_SCALE_REFERENCE_AREA)
+        .sqrt()
+        .clamp(1.0, max_scale)
+}
+
+/// Adaptive despeckle perimeter threshold for non-High presets.
+///
+/// Scales the base threshold by the resolution scale factor so that tiny noise
+/// fragments on large images are removed before contour extraction reaches the
+/// SVG stage.
+fn adaptive_resolution_despeckle_threshold(
+    config: &TracingConfig,
+    trace_width: u32,
+    trace_height: u32,
+) -> f64 {
+    let base = config.despeckle_threshold;
+    if base <= 0.0 || matches!(config.quality_preset, QualityPreset::High) {
+        return base;
+    }
+    base * adaptive_resolution_scale(trace_width, trace_height, ADAPTIVE_DESPECKLE_SCALE_MAX)
+}
+
+/// Adaptive SVG minimum region area for non-High presets.
+///
+/// Raises the area floor proportionally to image resolution so that large,
+/// photo-like inputs don't emit thousands of sub-pixel fragment paths.
+fn adaptive_resolution_min_region_area(
+    config: &TracingConfig,
+    trace_width: u32,
+    trace_height: u32,
+) -> f64 {
+    if matches!(config.quality_preset, QualityPreset::High) {
+        return config.min_region_area;
+    }
+    config.min_region_area
+        * adaptive_resolution_scale(trace_width, trace_height, ADAPTIVE_SVG_AREA_SCALE_MAX)
+}
+
+/// Adaptive polygon simplification tolerance for non-High presets.
+///
+/// Scales up the tolerance proportionally to image resolution so that paths on
+/// large images are simplified more aggressively, reducing point count and file
+/// size without visible quality loss at normal viewing scales.
+fn adaptive_resolution_simplification_tolerance(
+    config: &TracingConfig,
+    trace_width: u32,
+    trace_height: u32,
+) -> f64 {
+    if matches!(config.quality_preset, QualityPreset::High) {
+        return config.simplification_tolerance;
+    }
+    config.simplification_tolerance
+        * adaptive_resolution_scale(trace_width, trace_height, ADAPTIVE_TOLERANCE_SCALE_MAX)
 }
 
 /// Remove contours whose perimeter is below the despeckle threshold.
