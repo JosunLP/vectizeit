@@ -42,7 +42,15 @@ const PERCEPTUAL_DISTANCE_EPSILON: f64 = 1e-12;
 const TINY_COMPONENT_CLEANUP_PASSES: usize = 2;
 const HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN: usize = 16;
 const HIGH_DETAIL_TINY_COMPONENT_MAX_AREA: usize = 32;
+const HIGH_DETAIL_TINY_COMPONENT_TRACKING_MAX_AREA: usize = 64;
 const AMBIGUOUS_TINY_COMPONENT_MAX_AREA: usize = 4;
+const TINY_COMPONENT_THIN_FEATURE_MIN_SPAN: usize = 8;
+const TINY_COMPONENT_THIN_FEATURE_MAX_MINOR_SPAN: usize = 3;
+const TINY_COMPONENT_THIN_FEATURE_MAX_FILL_RATIO: f64 = 0.75;
+const TINY_COMPONENT_BLOB_MAX_SPAN: usize = 8;
+const TINY_COMPONENT_BLOB_MIN_FILL_RATIO: f64 = 0.45;
+const TINY_COMPONENT_PRESERVE_CONTRAST_DISTANCE_SQ: f64 = 900.0;
+const TINY_COMPONENT_LOW_CONTRAST_DISTANCE_SQ: f64 = 484.0;
 
 /// An entry in the color palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -200,6 +208,52 @@ struct ComponentBridgeContext<'a> {
     primary_label: u8,
     secondary_label: u8,
     palette: &'a [[u8; 3]],
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ComponentBounds {
+    min_x: usize,
+    min_y: usize,
+    max_x: usize,
+    max_y: usize,
+}
+
+impl ComponentBounds {
+    fn new(x: usize, y: usize) -> Self {
+        Self {
+            min_x: x,
+            min_y: y,
+            max_x: x,
+            max_y: y,
+        }
+    }
+
+    fn include(&mut self, x: usize, y: usize) {
+        self.min_x = self.min_x.min(x);
+        self.min_y = self.min_y.min(y);
+        self.max_x = self.max_x.max(x);
+        self.max_y = self.max_y.max(y);
+    }
+
+    fn width(self) -> usize {
+        self.max_x.saturating_sub(self.min_x) + 1
+    }
+
+    fn height(self) -> usize {
+        self.max_y.saturating_sub(self.min_y) + 1
+    }
+
+    fn major_span(self) -> usize {
+        self.width().max(self.height())
+    }
+
+    fn minor_span(self) -> usize {
+        self.width().min(self.height())
+    }
+
+    fn area(self) -> usize {
+        self.width() * self.height()
+    }
 }
 
 /// Result of color segmentation.
@@ -768,6 +822,7 @@ fn cleanup_tiny_label_components<P: PixelSource + ?Sized>(
 
     let width = width as usize;
     let height = height as usize;
+    let tracking_limit = tiny_component_tracking_area_limit(max_component_area);
 
     for _ in 0..TINY_COMPONENT_CLEANUP_PASSES {
         let mut visited = vec![false; labels.len()];
@@ -784,9 +839,12 @@ fn cleanup_tiny_label_components<P: PixelSource + ?Sized>(
             visited[start] = true;
 
             let mut component_area = 0usize;
-            let mut component_pixels = Vec::with_capacity(max_component_area);
+            let mut component_pixels = Vec::with_capacity(tracking_limit.min(64));
             let mut component_accumulator = PaletteAccumulator::default();
             let mut boundary_counts = vec![0u16; palette.len()];
+            let start_x = start % width;
+            let start_y = start / width;
+            let mut component_bounds = ComponentBounds::new(start_x, start_y);
             let mut track_component = true;
 
             while let Some(index) = queue.pop_front() {
@@ -794,7 +852,8 @@ fn cleanup_tiny_label_components<P: PixelSource + ?Sized>(
                 if track_component {
                     component_pixels.push(index);
                     component_accumulator.push(pixels.pixel(index));
-                    if component_area > max_component_area {
+                    component_bounds.include(index % width, index / width);
+                    if component_area > tracking_limit {
                         track_component = false;
                         component_pixels.clear();
                         boundary_counts.fill(0);
@@ -850,7 +909,7 @@ fn cleanup_tiny_label_components<P: PixelSource + ?Sized>(
                 }
             }
 
-            if component_area > max_component_area {
+            if component_area > tracking_limit || component_pixels.is_empty() {
                 continue;
             }
 
@@ -863,6 +922,28 @@ fn cleanup_tiny_label_components<P: PixelSource + ?Sized>(
             ) else {
                 continue;
             };
+
+            let replacement_contrast_sq =
+                euclidean_color_distance_sq(component_mean, palette[replacement as usize]);
+
+            if should_preserve_tiny_component(
+                component_area,
+                component_bounds,
+                replacement_contrast_sq,
+            ) {
+                continue;
+            }
+
+            if component_area > max_component_area
+                && !eligible_extended_tiny_component_cleanup(
+                    max_component_area,
+                    component_area,
+                    component_bounds,
+                    replacement_contrast_sq,
+                )
+            {
+                continue;
+            }
 
             let dominant_boundary = boundary_counts[replacement as usize] as usize;
             let boundary_total = boundary_counts
@@ -938,6 +1019,48 @@ fn choose_tiny_component_replacement(
     }
 
     best_label
+}
+
+fn tiny_component_tracking_area_limit(max_component_area: usize) -> usize {
+    if max_component_area >= HIGH_DETAIL_TINY_COMPONENT_MAX_AREA {
+        HIGH_DETAIL_TINY_COMPONENT_TRACKING_MAX_AREA
+    } else {
+        max_component_area
+    }
+}
+
+fn component_fill_ratio(component_area: usize, bounds: ComponentBounds) -> f64 {
+    let bbox_area = bounds.area().max(1);
+    component_area as f64 / bbox_area as f64
+}
+
+fn should_preserve_tiny_component(
+    component_area: usize,
+    bounds: ComponentBounds,
+    replacement_contrast_sq: f64,
+) -> bool {
+    if component_area <= AMBIGUOUS_TINY_COMPONENT_MAX_AREA {
+        return false;
+    }
+
+    bounds.major_span() >= TINY_COMPONENT_THIN_FEATURE_MIN_SPAN
+        && replacement_contrast_sq >= TINY_COMPONENT_PRESERVE_CONTRAST_DISTANCE_SQ
+        && (bounds.minor_span() <= TINY_COMPONENT_THIN_FEATURE_MAX_MINOR_SPAN
+            || component_fill_ratio(component_area, bounds)
+                <= TINY_COMPONENT_THIN_FEATURE_MAX_FILL_RATIO)
+}
+
+fn eligible_extended_tiny_component_cleanup(
+    max_component_area: usize,
+    component_area: usize,
+    bounds: ComponentBounds,
+    replacement_contrast_sq: f64,
+) -> bool {
+    component_area > max_component_area
+        && component_area <= tiny_component_tracking_area_limit(max_component_area)
+        && bounds.major_span() <= TINY_COMPONENT_BLOB_MAX_SPAN
+        && component_fill_ratio(component_area, bounds) >= TINY_COMPONENT_BLOB_MIN_FILL_RATIO
+        && replacement_contrast_sq <= TINY_COMPONENT_LOW_CONTRAST_DISTANCE_SQ
 }
 
 fn label_usage(labels: &[u8], palette_len: usize) -> Vec<u32> {

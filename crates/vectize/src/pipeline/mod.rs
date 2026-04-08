@@ -46,6 +46,13 @@ const ADAPTIVE_HIGH_DETAIL_MIN_CONTOURS: usize = 1_024;
 const ADAPTIVE_HIGH_DETAIL_TRACE_PIXELS_PER_CONTOUR: u64 = 320;
 const ADAPTIVE_HIGH_DETAIL_PALETTE_MIN: usize = 16;
 const ADAPTIVE_HIGH_DETAIL_COLOR_COUNT_MIN: u16 = 32;
+const HIGH_DETAIL_ADAPTIVE_MIN_TRACE_AREA: u64 = 1_048_576;
+const HIGH_DETAIL_ADAPTIVE_TRACE_PIXELS_PER_CONTOUR: u64 = 160;
+const HIGH_DETAIL_ADAPTIVE_SCALE_REFERENCE_AREA: f64 = 1_048_576.0;
+const HIGH_DETAIL_ADAPTIVE_DESPECKLE_FLOOR: f64 = 1.25;
+const HIGH_DETAIL_ADAPTIVE_DESPECKLE_SCALE_MAX: f64 = 2.5;
+const HIGH_DETAIL_ADAPTIVE_AREA_SCALE_MAX: f64 = 3.0;
+const HIGH_DETAIL_ADAPTIVE_TOLERANCE_SCALE_MAX: f64 = 2.0;
 
 /// Reference area (256×256 px) for resolution-adaptive parameter scaling.
 const ADAPTIVE_SCALE_REFERENCE_AREA: f64 = 65_536.0;
@@ -160,6 +167,22 @@ pub(crate) fn run_pipeline_with_debug_and_progress(
         svg_config.min_region_area = effective_min_region_area;
     }
 
+    let adaptive_high_detail_area_floor = adaptive_high_detail_min_region_area(
+        config,
+        svg_config.min_region_area,
+        segmentation.palette.len(),
+        trace_width,
+        trace_height,
+        extracted_metrics.contours,
+    );
+    if adaptive_high_detail_area_floor > svg_config.min_region_area {
+        debug!(
+            "Pipeline: raising high-detail SVG min_region_area from {:.2} to {:.2} for {}×{} image",
+            svg_config.min_region_area, adaptive_high_detail_area_floor, trace_width, trace_height,
+        );
+        svg_config.min_region_area = adaptive_high_detail_area_floor;
+    }
+
     // Resolution-adaptive SVG floor and tolerance for non-High presets.
     // Scales up min_region_area and simplification_tolerance proportionally to
     // sqrt(image_area / reference_area) so large images don't flood the SVG
@@ -181,6 +204,23 @@ pub(crate) fn run_pipeline_with_debug_and_progress(
             svg_config.simplification_tolerance, resolution_tolerance, trace_width, trace_height,
         );
         svg_config.simplification_tolerance = resolution_tolerance;
+    }
+    let adaptive_high_detail_tolerance = adaptive_high_detail_simplification_tolerance(
+        config,
+        segmentation.palette.len(),
+        trace_width,
+        trace_height,
+        extracted_metrics.contours,
+    );
+    if adaptive_high_detail_tolerance > svg_config.simplification_tolerance {
+        debug!(
+            "Pipeline: raising high-detail simplification tolerance from {:.2} to {:.2} for {}×{} image",
+            svg_config.simplification_tolerance,
+            adaptive_high_detail_tolerance,
+            trace_width,
+            trace_height,
+        );
+        svg_config.simplification_tolerance = adaptive_high_detail_tolerance;
     }
 
     let regions: Vec<ColorRegion> = contour_groups
@@ -316,6 +356,11 @@ fn uses_default_high_min_region_area(config: &TracingConfig) -> bool {
     (config.min_region_area - default_high.min_region_area).abs() <= f64::EPSILON
 }
 
+fn uses_default_high_despeckle_threshold(config: &TracingConfig) -> bool {
+    let default_high = QualityPreset::High.to_config();
+    (config.despeckle_threshold - default_high.despeckle_threshold).abs() <= f64::EPSILON
+}
+
 /// Resolution scale factor: `sqrt(trace_area / ADAPTIVE_SCALE_REFERENCE_AREA)`,
 /// clamped to `[1.0, max_scale]`.
 ///
@@ -340,7 +385,13 @@ fn adaptive_resolution_despeckle_threshold(
     trace_height: u32,
 ) -> f64 {
     let base = config.despeckle_threshold;
-    if base <= 0.0 || matches!(config.quality_preset, QualityPreset::High) {
+    if matches!(config.quality_preset, QualityPreset::High) {
+        if base > 0.0 {
+            return base;
+        }
+        return adaptive_high_detail_despeckle_threshold(config, trace_width, trace_height);
+    }
+    if base <= 0.0 {
         return base;
     }
     base * adaptive_resolution_scale(trace_width, trace_height, ADAPTIVE_DESPECKLE_SCALE_MAX)
@@ -377,6 +428,113 @@ fn adaptive_resolution_simplification_tolerance(
     }
     config.simplification_tolerance
         * adaptive_resolution_scale(trace_width, trace_height, ADAPTIVE_TOLERANCE_SCALE_MAX)
+}
+
+fn adaptive_high_detail_scale(trace_width: u32, trace_height: u32, max_scale: f64) -> f64 {
+    let area = f64::from(trace_width) * f64::from(trace_height);
+    (area / HIGH_DETAIL_ADAPTIVE_SCALE_REFERENCE_AREA)
+        .sqrt()
+        .clamp(1.0, max_scale)
+}
+
+fn adaptive_high_detail_despeckle_threshold(
+    config: &TracingConfig,
+    trace_width: u32,
+    trace_height: u32,
+) -> f64 {
+    if !matches!(config.quality_preset, QualityPreset::High)
+        || !uses_default_high_despeckle_threshold(config)
+        || !config.enable_preprocessing
+        || !config.enable_denoising
+        || config.color_count < ADAPTIVE_HIGH_DETAIL_COLOR_COUNT_MIN
+    {
+        return config.despeckle_threshold;
+    }
+
+    let trace_area = u64::from(trace_width) * u64::from(trace_height);
+    if trace_area < HIGH_DETAIL_ADAPTIVE_MIN_TRACE_AREA {
+        return config.despeckle_threshold;
+    }
+
+    HIGH_DETAIL_ADAPTIVE_DESPECKLE_FLOOR
+        * adaptive_high_detail_scale(
+            trace_width,
+            trace_height,
+            HIGH_DETAIL_ADAPTIVE_DESPECKLE_SCALE_MAX,
+        )
+}
+
+fn should_apply_high_detail_resolution_scaling(
+    config: &TracingConfig,
+    palette_len: usize,
+    trace_width: u32,
+    trace_height: u32,
+    extracted_contours: usize,
+) -> bool {
+    if !matches!(config.quality_preset, QualityPreset::High)
+        || !config.enable_preprocessing
+        || !config.enable_denoising
+        || config.color_count < ADAPTIVE_HIGH_DETAIL_COLOR_COUNT_MIN
+        || palette_len < ADAPTIVE_HIGH_DETAIL_PALETTE_MIN
+        || extracted_contours < ADAPTIVE_HIGH_DETAIL_MIN_CONTOURS
+    {
+        return false;
+    }
+
+    let trace_area = u64::from(trace_width) * u64::from(trace_height);
+    trace_area >= HIGH_DETAIL_ADAPTIVE_MIN_TRACE_AREA
+        && (extracted_contours as u64) * HIGH_DETAIL_ADAPTIVE_TRACE_PIXELS_PER_CONTOUR >= trace_area
+}
+
+fn adaptive_high_detail_min_region_area(
+    config: &TracingConfig,
+    current_min_region_area: f64,
+    palette_len: usize,
+    trace_width: u32,
+    trace_height: u32,
+    extracted_contours: usize,
+) -> f64 {
+    if !should_apply_high_detail_resolution_scaling(
+        config,
+        palette_len,
+        trace_width,
+        trace_height,
+        extracted_contours,
+    ) {
+        return current_min_region_area;
+    }
+
+    current_min_region_area
+        * adaptive_high_detail_scale(
+            trace_width,
+            trace_height,
+            HIGH_DETAIL_ADAPTIVE_AREA_SCALE_MAX,
+        )
+}
+
+fn adaptive_high_detail_simplification_tolerance(
+    config: &TracingConfig,
+    palette_len: usize,
+    trace_width: u32,
+    trace_height: u32,
+    extracted_contours: usize,
+) -> f64 {
+    if !should_apply_high_detail_resolution_scaling(
+        config,
+        palette_len,
+        trace_width,
+        trace_height,
+        extracted_contours,
+    ) {
+        return config.simplification_tolerance;
+    }
+
+    config.simplification_tolerance
+        * adaptive_high_detail_scale(
+            trace_width,
+            trace_height,
+            HIGH_DETAIL_ADAPTIVE_TOLERANCE_SCALE_MAX,
+        )
 }
 
 /// Remove contours whose perimeter is below the despeckle threshold.
@@ -547,5 +705,36 @@ mod tests {
             ),
             QualityPreset::Balanced.to_config().min_region_area
         );
+    }
+
+    #[test]
+    fn adaptive_high_detail_despeckle_threshold_only_applies_to_large_default_high_inputs() {
+        let high = QualityPreset::High.to_config();
+        let balanced = QualityPreset::Balanced.to_config();
+
+        assert!(adaptive_high_detail_despeckle_threshold(&high, 1_536, 1_536) > 0.0);
+        assert_eq!(
+            adaptive_high_detail_despeckle_threshold(&high, 512, 512),
+            0.0
+        );
+        assert_eq!(
+            adaptive_high_detail_despeckle_threshold(&balanced, 1_536, 1_536),
+            balanced.despeckle_threshold
+        );
+    }
+
+    #[test]
+    fn adaptive_high_detail_scaling_skips_sparse_or_small_traces() {
+        let high = QualityPreset::High.to_config();
+
+        assert!(should_apply_high_detail_resolution_scaling(
+            &high, 24, 1_536, 1_536, 20_000
+        ));
+        assert!(!should_apply_high_detail_resolution_scaling(
+            &high, 24, 512, 512, 20_000
+        ));
+        assert!(!should_apply_high_detail_resolution_scaling(
+            &high, 24, 1_536, 1_536, 500
+        ));
     }
 }
