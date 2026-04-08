@@ -2,7 +2,8 @@
 
 High-quality raster-to-vector image tracing tool and library written in Rust.
 
-`vectizeit` converts bitmap images (PNG, JPEG, WebP) into clean SVG vector graphics through a
+`vectizeit` converts bitmap images (PNG, JPEG/JPG, WebP, BMP, GIF, TIFF, TGA, ICO, PNM, and
+other common still-bitmap formats) into clean SVG vector graphics through a
 multi-stage processing pipeline — from color quantization and contour tracing to Bezier curve
 fitting and SVG emission.
 
@@ -226,6 +227,9 @@ trace convert input.png -o output.svg
 # Use the high-quality preset
 trace convert input.webp --preset high
 
+# Convert a BMP file too
+trace convert input.bmp -o output.svg
+
 # Customize palette size, tolerance, smoothing, corners, and despeckling
 trace convert photo.jpg --colors 32 --tolerance 0.5 --smoothing 0.7 --corner-sensitivity 0.8 --despeckle-threshold 1.5
 
@@ -257,7 +261,7 @@ trace convert poster.png --preset high --tile-size 512
 ### Batch conversion
 
 ```bash
-# Convert all PNG/JPEG/WebP files in a directory
+# Convert all supported bitmap image files in a directory
 trace batch ./images/ ./vectors/ --format svg
 
 # Use a quality preset for the whole batch
@@ -449,8 +453,9 @@ if let Err(msg) = config.validate() {
 The library processes images in eight sequential stages:
 
 1. **Load** — `pipeline::loader`
-  Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the
-  file extension or byte magic header.
+  Decode common still-bitmap formats such as PNG, JPEG/JPG, WebP, BMP, GIF, TIFF,
+  TGA, ICO, and PNM using the `image` crate. Format is inferred from byte magic
+  headers when possible rather than relying only on the file extension.
 2. **Preprocess** — `pipeline::preprocess`
   Convert to RGBA8, optionally apply a 3×3 edge-aware Gaussian blur for denoising
   (controlled by `enable_preprocessing` and `enable_denoising`), optionally resample
@@ -548,7 +553,7 @@ preset.
 ## Dependency Choices
 
 - [`image`](https://crates.io/crates/image) — De facto standard Rust image I/O;
-  handles PNG, JPEG, and WebP decoding with a unified API.
+  handles PNG, JPEG/JPG, WebP, BMP, GIF, ICO, PNM, TGA, and TIFF decoding with a unified API.
 - [`thiserror`](https://crates.io/crates/thiserror) — Generates `Display` and
   `Error` impls for the error enum with minimal boilerplate.
 - [`log`](https://crates.io/crates/log) — Logging facade that keeps the library

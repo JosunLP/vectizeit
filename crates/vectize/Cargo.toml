@@ -6,7 +6,7 @@ description = "High-quality raster-to-vector image tracing library"
 license = "MIT"
 
 [dependencies]
-image = { version = "0.25", features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", features = ["png", "jpeg", "webp", "bmp", "gif", "ico", "pnm", "tga", "tiff"] }
 thiserror = "1"
 log = "0.4"
 rayon = "1"

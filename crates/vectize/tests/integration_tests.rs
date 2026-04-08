@@ -21,12 +21,30 @@ fn encode_png(img: &RgbaImage) -> Vec<u8> {
     buf.into_inner()
 }
 
+/// Helper: encode an RGBA image to BMP bytes.
+fn encode_bmp(img: &RgbaImage) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img.clone())
+        .write_to(&mut buf, ImageFormat::Bmp)
+        .unwrap();
+    buf.into_inner()
+}
+
 /// Helper: encode an RGBA image to JPEG bytes (converts to RGB first since JPEG has no alpha).
 fn encode_jpeg(img: &RgbaImage) -> Vec<u8> {
     let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
     let mut buf = Cursor::new(Vec::new());
     rgb.write_to(&mut buf, ImageFormat::Jpeg).unwrap();
     buf.into_inner()
+}
+
+fn unique_temp_path(stem: &str, extension: &str) -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    std::env::temp_dir().join(format!("vectizeit_{stem}_{unique}.{extension}"))
 }
 
 fn extract_path_numbers(svg: &str) -> Vec<f64> {
@@ -910,24 +928,28 @@ fn trace_file_nonexistent_returns_error() {
 
 #[test]
 fn trace_file_round_trip() {
-    // Create a temporary PNG file, trace it, write the SVG, verify output
+    // Trace both a standard BMP input and a PNG whose file extension is non-standard.
     let img = make_solid_image(24, 24, Rgba([0, 200, 100, 255]));
-    let png_path = std::env::temp_dir().join("vectize_test_roundtrip.png");
-    let svg_path = std::env::temp_dir().join("vectize_test_roundtrip.svg");
+    let bmp_path = unique_temp_path("roundtrip_bmp", "bmp");
+    let sniffed_path = unique_temp_path("roundtrip_sniffed", "img");
+    let svg_path = unique_temp_path("roundtrip_output", "svg");
 
-    img.save(&png_path).unwrap();
+    std::fs::write(&bmp_path, encode_bmp(&img)).unwrap();
+    std::fs::write(&sniffed_path, encode_png(&img)).unwrap();
 
     let tracer = Tracer::with_preset(QualityPreset::Balanced);
-    let svg = tracer.trace_file(&png_path).unwrap();
 
-    std::fs::write(&svg_path, &svg).unwrap();
+    for input_path in [&bmp_path, &sniffed_path] {
+        let svg = tracer.trace_file(input_path).unwrap();
+        std::fs::write(&svg_path, &svg).unwrap();
 
-    let written = std::fs::read_to_string(&svg_path).unwrap();
-    assert!(written.contains("<svg"));
-    assert!(written.contains("viewBox=\"0 0 24 24\""));
+        let written = std::fs::read_to_string(&svg_path).unwrap();
+        assert!(written.contains("<svg"));
+        assert!(written.contains("viewBox=\"0 0 24 24\""));
+    }
 
-    // Cleanup
-    let _ = std::fs::remove_file(&png_path);
+    let _ = std::fs::remove_file(&bmp_path);
+    let _ = std::fs::remove_file(&sniffed_path);
     let _ = std::fs::remove_file(&svg_path);
 }
 

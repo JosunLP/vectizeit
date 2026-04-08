@@ -16,16 +16,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use log::{debug, error, info, warn};
 use rayon::prelude::*;
-use vectize::{QualityPreset, Tracer, TracingConfig, TracingConfigOverrides};
+use vectize::{
+    is_supported_bitmap_path, QualityPreset, Tracer, TracingConfig, TracingConfigOverrides,
+};
 
 /// trace: high-quality raster-to-vector image tracing tool
 #[derive(Parser, Debug)]
 #[command(
     name = "trace",
     version,
-    about = "Convert raster images (PNG, JPEG, WebP) to SVG vector graphics",
+    about = "Convert bitmap images (PNG, JPEG/JPG, WebP, BMP, GIF, TIFF, TGA, ICO, PNM) to SVG vector graphics",
     long_about = "trace converts bitmap images into clean SVG vector graphics using a \
-        multi-stage processing pipeline. It supports PNG, JPEG, and WebP inputs.\n\n\
+        multi-stage processing pipeline. It supports common bitmap inputs such as \
+        PNG, JPEG/JPG, WebP, BMP, GIF, TIFF, TGA, ICO, and PNM.\n\n\
         Examples:\n  \
         trace convert input.png -o output.svg\n  \
         trace convert input.webp --preset high\n  \
@@ -38,11 +41,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Convert a single image file to SVG
+    /// Convert a single bitmap image file to SVG
     #[command(name = "convert", alias = "c")]
     Convert(ConvertArgs),
 
-    /// Batch convert all images in a directory
+    /// Batch convert all supported bitmap images in a directory
     #[command(name = "batch", alias = "b")]
     Batch(BatchArgs),
 }
@@ -50,7 +53,7 @@ enum Command {
 /// Arguments for single-file conversion.
 #[derive(Args, Debug)]
 struct ConvertArgs {
-    /// Input image file (PNG, JPEG, or WebP)
+    /// Input bitmap image file
     input: PathBuf,
 
     /// Output SVG file (defaults to input filename with .svg extension)
@@ -76,7 +79,7 @@ struct ConvertArgs {
 /// Arguments for batch conversion.
 #[derive(Args, Debug)]
 struct BatchArgs {
-    /// Input directory containing image files
+    /// Input directory containing bitmap image files
     input_dir: PathBuf,
 
     /// Output directory for SVG files
@@ -268,7 +271,6 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&args.output_dir)?;
 
-    let extensions = ["png", "jpg", "jpeg", "webp"];
     let tracer = Tracer::new(config);
     let total = AtomicUsize::new(0);
     let succeeded = AtomicUsize::new(0);
@@ -277,15 +279,7 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             let path = entry.path();
-            if !path.is_file() {
-                return false;
-            }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            extensions.contains(&ext.as_str())
+            path.is_file() && is_supported_bitmap_path(&path)
         })
         .collect();
 

@@ -4,7 +4,8 @@
 //!
 //! ## Overview
 //!
-//! `vectize` converts bitmap images (PNG, JPEG, WebP) into clean SVG vector graphics
+//! `vectize` converts bitmap images (PNG, JPEG/JPG, WebP, and other common bitmap formats)
+//! into clean SVG vector graphics
 //! through a multi-stage processing pipeline:
 //!
 //! 1. **Loading** – decode the source image
@@ -38,6 +39,9 @@ pub mod result;
 
 pub use config::{QualityPreset, TracingConfig, TracingConfigOverrides};
 pub use error::{Result, VectizeError};
+pub use pipeline::loader::{
+    is_supported_bitmap_path, SUPPORTED_BITMAP_EXTENSIONS, SUPPORTED_BITMAP_FORMATS_SUMMARY,
+};
 pub use pipeline::segment::PaletteColor;
 pub use progress::{TraceProgressUpdate, TraceStage};
 pub use result::{TraceDebugInfo, TraceStageMetrics, TracedRegionSummary, TracingResult};

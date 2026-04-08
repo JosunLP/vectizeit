@@ -10,8 +10,7 @@ fn trace_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_trace"))
 }
 
-/// Helper: create a temporary test PNG file and return its path.
-fn create_test_png(name: &str) -> std::path::PathBuf {
+fn create_test_bitmap(name: &str, format: image::ImageFormat) -> std::path::PathBuf {
     use image::{ImageBuffer, Rgba, RgbaImage};
 
     let path = std::env::temp_dir().join(name);
@@ -24,8 +23,13 @@ fn create_test_png(name: &str) -> std::path::PathBuf {
             Rgba([0, 0, 255, 255])
         }
     });
-    img.save(&path).unwrap();
+    img.save_with_format(&path, format).unwrap();
     path
+}
+
+/// Helper: create a temporary test PNG file and return its path.
+fn create_test_png(name: &str) -> std::path::PathBuf {
+    create_test_bitmap(name, image::ImageFormat::Png)
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +60,7 @@ fn cli_convert_help() {
     let output = trace_bin().args(["convert", "--help"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Input image file"));
+    assert!(stdout.contains("Input bitmap image file"));
     assert!(stdout.contains("--preset"));
     assert!(stdout.contains("--output"));
     assert!(stdout.contains("--colors"));
@@ -73,7 +77,7 @@ fn cli_batch_help() {
     let output = trace_bin().args(["batch", "--help"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Input directory"));
+    assert!(stdout.contains("Input directory containing bitmap image files"));
     assert!(stdout.contains("Output directory"));
     assert!(stdout.contains("--format"));
     assert!(stdout.contains("--preset"));
@@ -87,24 +91,27 @@ fn cli_batch_help() {
 
 #[test]
 fn cli_convert_to_stdout() {
-    let png = create_test_png("cli_test_stdout.png");
+    for path in [
+        create_test_png("cli_test_stdout.png"),
+        create_test_bitmap("cli_test_stdout.bmp", image::ImageFormat::Bmp),
+    ] {
+        let output = trace_bin()
+            .args(["convert", path.to_str().unwrap(), "--stdout"])
+            .output()
+            .unwrap();
 
-    let output = trace_bin()
-        .args(["convert", png.to_str().unwrap(), "--stdout"])
-        .output()
-        .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("<svg"), "Expected SVG output on stdout");
+        assert!(stdout.contains("</svg>"));
 
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("<svg"), "Expected SVG output on stdout");
-    assert!(stdout.contains("</svg>"));
-
-    let _ = std::fs::remove_file(&png);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[test]
@@ -416,12 +423,12 @@ fn cli_batch_converts_directory() {
 
     std::fs::create_dir_all(&input_dir).unwrap();
 
-    // Create test images in input directory
-    for name in ["a.png", "b.png"] {
-        let img: image::RgbaImage =
-            image::ImageBuffer::from_fn(8, 8, |_, _| image::Rgba([128, 64, 32, 255]));
-        img.save(input_dir.join(name)).unwrap();
-    }
+    // Create test images in input directory using two supported bitmap formats.
+    let img: image::RgbaImage =
+        image::ImageBuffer::from_fn(8, 8, |_, _| image::Rgba([128, 64, 32, 255]));
+    img.save(input_dir.join("a.png")).unwrap();
+    img.save_with_format(input_dir.join("b.bmp"), image::ImageFormat::Bmp)
+        .unwrap();
 
     let output = trace_bin()
         .args([
