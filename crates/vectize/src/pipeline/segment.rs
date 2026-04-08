@@ -41,6 +41,7 @@ const TILED_PALETTE_SAMPLE_LIMIT: usize = 131_072;
 const PERCEPTUAL_DISTANCE_EPSILON: f64 = 1e-12;
 const TINY_COMPONENT_CLEANUP_PASSES: usize = 2;
 const HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN: usize = 16;
+const COMPACT_TINY_COMPONENT_PALETTE_MAX: usize = 10;
 const HIGH_DETAIL_TINY_COMPONENT_MAX_AREA: usize = 32;
 const HIGH_DETAIL_TINY_COMPONENT_TRACKING_MAX_AREA: usize = 64;
 const AMBIGUOUS_TINY_COMPONENT_MAX_AREA: usize = 4;
@@ -406,15 +407,26 @@ fn tiny_component_cleanup_area_threshold(
     palette_len: usize,
     labels: &[u8],
 ) -> usize {
-    if matches!(config.quality_preset, QualityPreset::High)
+    if !(matches!(config.quality_preset, QualityPreset::High)
         && config.enable_preprocessing
         && config.enable_denoising
         && config.color_count >= 32
-        && palette_len >= HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN
-        && !labels.is_empty()
-        && flat_art_rerun_cap(labels, palette_len).is_none()
+        && !labels.is_empty())
     {
-        HIGH_DETAIL_TINY_COMPONENT_MAX_AREA
+        return 0;
+    }
+
+    if palette_len >= HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN {
+        if flat_art_rerun_cap(labels, palette_len).is_none() {
+            HIGH_DETAIL_TINY_COMPONENT_MAX_AREA
+        } else {
+            0
+        }
+    } else if palette_len <= COMPACT_TINY_COMPONENT_PALETTE_MAX {
+        // Compact flat-art/text palettes still benefit from a very small cleanup
+        // pass so 1–4 px antialias blobs can collapse without risking real thin
+        // strokes or lettering.
+        AMBIGUOUS_TINY_COMPONENT_MAX_AREA
     } else {
         0
     }
@@ -1723,7 +1735,7 @@ mod tests {
         );
         assert_eq!(
             tiny_component_cleanup_area_threshold(&high, 8, &rich_labels),
-            0
+            4
         );
         assert_eq!(
             tiny_component_cleanup_area_threshold(&balanced, 32, &rich_labels),

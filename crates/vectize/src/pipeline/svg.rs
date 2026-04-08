@@ -66,6 +66,7 @@ struct ContourGeometryProfile {
     corner_sensitivity: f64,
     seam_stroke_width_centi_px: u8,
     post_smoothing_tolerance_factor: f64,
+    trace_grid_tolerance_boost: f64,
     prefer_linear: bool,
 }
 
@@ -136,6 +137,8 @@ const POST_SMOOTHING_STAIRCASE_TOLERANCE_FACTOR: f64 = 0.82;
 const HIGH_STAIRCASE_SEAM_GATE_FACTOR: f64 = 0.45;
 const HIGH_STAIRCASE_SEAM_BONUS_SCALE: f64 = 0.35;
 const MEDIUM_BAND_SEAM_PENALTY_MIN: f64 = 0.55;
+const HIGH_TRACE_GRID_TOLERANCE_BOOST_BASE: f64 = 0.18;
+const HIGH_TRACE_GRID_TOLERANCE_BOOST_STAIRCASE_MAX: f64 = 0.62;
 const OUTLINE_COLOR_LUMA_MAX: f64 = 42.0;
 const OUTLINE_COLOR_CHROMA_MAX: u8 = 20;
 
@@ -798,6 +801,7 @@ fn build_path_data_from_indices(
         let regularized = regularize_contour_geometry(
             &smoothed,
             config.simplification_tolerance,
+            coordinate_scale,
             &profile,
             is_outline_like_color(region_color),
         );
@@ -851,6 +855,7 @@ fn build_path_data_from_indices(
 fn regularize_contour_geometry(
     points: &[(f64, f64)],
     simplification_tolerance: f64,
+    coordinate_scale: f64,
     profile: &ContourGeometryProfile,
     outline_like: bool,
 ) -> Vec<(f64, f64)> {
@@ -858,8 +863,13 @@ fn regularize_contour_geometry(
         return points.to_vec();
     }
 
-    let tolerance = post_smoothing_simplification_tolerance(
+    let base_tolerance = scale_adjusted_post_smoothing_base_tolerance(
         simplification_tolerance,
+        coordinate_scale,
+        profile.trace_grid_tolerance_boost,
+    );
+    let tolerance = post_smoothing_simplification_tolerance(
+        base_tolerance,
         profile.smoothing_strength,
         if outline_like {
             profile
@@ -952,6 +962,22 @@ fn contour_geometry_profile(
     } else {
         0.0
     };
+    let trace_grid_tolerance_boost = if matches!(config.quality_preset, QualityPreset::High) {
+        let broad_contour_factor = remap_clamped(
+            thickness,
+            LINEAR_CONTOUR_THICKNESS_PX,
+            FULL_SMOOTHING_THICKNESS_PX,
+            0.0,
+            1.0,
+        );
+        (broad_contour_factor
+            * (HIGH_TRACE_GRID_TOLERANCE_BOOST_BASE
+                + (high_detail_edge_profile.staircase_factor
+                    * HIGH_TRACE_GRID_TOLERANCE_BOOST_STAIRCASE_MAX)))
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     ContourGeometryProfile {
         smoothing_strength,
@@ -965,6 +991,7 @@ fn contour_geometry_profile(
             high_detail_edge_profile.staircase_factor,
         ),
         post_smoothing_tolerance_factor,
+        trace_grid_tolerance_boost,
         prefer_linear: thickness <= LINEAR_CONTOUR_THICKNESS_PX
             || (matches!(config.quality_preset, QualityPreset::High)
                 && high_detail_edge_profile.polygonal_factor >= HIGH_POLYGONAL_LINEAR_FACTOR_MIN
@@ -991,11 +1018,7 @@ fn seam_stroke_width_centi_px(
         return 0;
     }
 
-    let start_thickness = if staircase_factor >= HIGH_STAIRCASE_SEAM_GATE_FACTOR {
-        FULL_SEAM_STROKE_THICKNESS_PX
-    } else {
-        MIN_SEAM_STROKE_THICKNESS_PX
-    };
+    let start_thickness = MIN_SEAM_STROKE_THICKNESS_PX;
 
     if thickness <= start_thickness {
         return 0;
@@ -1133,6 +1156,24 @@ fn post_smoothing_simplification_tolerance(
     }
 
     (base * tolerance_factor.clamp(0.0, 1.0) * (0.75 + (smoothing_strength * 0.50))).max(0.08)
+}
+
+fn scale_adjusted_post_smoothing_base_tolerance(
+    simplification_tolerance: f64,
+    coordinate_scale: f64,
+    trace_grid_tolerance_boost: f64,
+) -> f64 {
+    let base = simplification_tolerance.max(0.0);
+    if base <= 0.0
+        || coordinate_scale <= f64::EPSILON
+        || coordinate_scale >= 1.0
+        || trace_grid_tolerance_boost <= 0.0
+    {
+        return base;
+    }
+
+    let trace_grid_base = base / coordinate_scale;
+    base + ((trace_grid_base - base) * trace_grid_tolerance_boost.clamp(0.0, 1.0))
 }
 
 fn contour_visual_thickness(points: &[(f64, f64)]) -> f64 {
@@ -1888,8 +1929,13 @@ mod tests {
             ..ContourGeometryProfile::default()
         };
 
-        let regularized =
-            regularize_contour_geometry(&points, config.simplification_tolerance, &profile, false);
+        let regularized = regularize_contour_geometry(
+            &points,
+            config.simplification_tolerance,
+            1.0,
+            &profile,
+            false,
+        );
 
         assert_eq!(regularized, points);
     }
@@ -1919,8 +1965,13 @@ mod tests {
             ..ContourGeometryProfile::default()
         };
 
-        let regularized =
-            regularize_contour_geometry(&points, config.simplification_tolerance, &profile, false);
+        let regularized = regularize_contour_geometry(
+            &points,
+            config.simplification_tolerance,
+            1.0,
+            &profile,
+            false,
+        );
 
         assert!(regularized.len() < points.len());
         assert!(regularized.len() >= 4);
@@ -1955,6 +2006,20 @@ mod tests {
     }
 
     #[test]
+    fn scale_adjusted_post_smoothing_base_tolerance_only_boosts_dense_trace_grids() {
+        assert!((scale_adjusted_post_smoothing_base_tolerance(1.0, 1.0, 0.8) - 1.0).abs() < 1e-10);
+        assert!((scale_adjusted_post_smoothing_base_tolerance(1.0, 0.5, 0.0) - 1.0).abs() < 1e-10);
+        assert!((scale_adjusted_post_smoothing_base_tolerance(1.0, 0.5, 0.5) - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn staircase_seam_gate_does_not_require_extra_thickness() {
+        assert_eq!(seam_stroke_width_centi_px(4.0, 0.5, 6.0, 0.8), 0);
+        assert!(seam_stroke_width_centi_px(6.0, 0.5, 6.0, 0.0) > 0);
+        assert!(seam_stroke_width_centi_px(6.0, 0.5, 6.0, 0.8) > 0);
+    }
+
+    #[test]
     fn contour_geometry_profile_reduces_smoothing_for_thin_regions() {
         let config = crate::config::TracingConfig {
             smoothing_strength: 0.5,
@@ -1975,6 +2040,9 @@ mod tests {
         );
         assert!(thin_profile.prefer_linear);
         assert!(!broad_profile.prefer_linear);
+        assert!(
+            thin_profile.trace_grid_tolerance_boost <= broad_profile.trace_grid_tolerance_boost
+        );
     }
 
     #[test]
@@ -2022,10 +2090,10 @@ mod tests {
     fn seam_stroke_width_skips_thin_regions() {
         assert_eq!(seam_stroke_width_centi_px(2.0, 0.4, 0.0, 0.0), 0);
         assert!(seam_stroke_width_centi_px(10.0, 0.4, 0.0, 0.0) > 0);
-        assert_eq!(seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.8), 0);
+        assert!(seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.8) > 0);
         assert!(
-            seam_stroke_width_centi_px(18.0, 0.4, 10.0, 0.8)
-                > seam_stroke_width_centi_px(18.0, 0.4, 0.0, 0.8)
+            seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.8)
+                > seam_stroke_width_centi_px(10.0, 0.4, 0.0, 0.8)
         );
         assert_eq!(
             seam_stroke_width_centi_px(40.0, 0.8, 40.0, 0.0),
