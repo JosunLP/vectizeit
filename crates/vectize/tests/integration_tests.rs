@@ -5,7 +5,9 @@
 
 use image::{ImageBuffer, ImageFormat, Rgba, RgbaImage};
 use std::io::Cursor;
-use vectize::{QualityPreset, TraceStage, Tracer, TracingConfig, VectizeError};
+use vectize::{
+    QualityPreset, TraceStage, Tracer, TracingConfig, TracingConfigOverrides, VectizeError,
+};
 
 /// Helper: create a solid-color RGBA image of the given size and color.
 fn make_solid_image(width: u32, height: u32, color: Rgba<u8>) -> RgbaImage {
@@ -1042,6 +1044,43 @@ fn quality_preset_display() {
     assert_eq!(format!("{}", QualityPreset::Fast), "fast");
     assert_eq!(format!("{}", QualityPreset::Balanced), "balanced");
     assert_eq!(format!("{}", QualityPreset::High), "high");
+}
+
+#[test]
+fn tracing_config_overrides_match_manual_configuration() {
+    let img = ImageBuffer::from_fn(10, 10, |x, y| {
+        if (2..=7).contains(&x) && (2..=7).contains(&y) {
+            Rgba([32, 96, 180, 255])
+        } else {
+            Rgba([0, 0, 0, 0])
+        }
+    });
+    let bytes = encode_png(&img);
+    let overrides = TracingConfigOverrides {
+        color_count: Some(6),
+        simplification_tolerance: Some(0.5),
+        min_region_area: Some(0.0),
+        smoothing_strength: Some(0.2),
+        corner_sensitivity: Some(0.9),
+        alpha_threshold: Some(64),
+        despeckle_threshold: Some(0.0),
+        enable_denoising: Some(false),
+        enable_preprocessing: Some(true),
+        background_color: Some((0x10, 0x20, 0x30)),
+        enable_svg_gradients: Some(false),
+        tile_size: Some(8),
+    };
+
+    let override_config =
+        TracingConfig::from_preset_with_overrides(QualityPreset::High, &overrides).unwrap();
+    let mut manual_config = QualityPreset::High.to_config();
+    manual_config.apply_overrides(&overrides);
+    manual_config.validate().unwrap();
+
+    let override_svg = Tracer::new(override_config).trace_bytes(&bytes).unwrap();
+    let manual_svg = Tracer::new(manual_config).trace_bytes(&bytes).unwrap();
+
+    assert_eq!(override_svg, manual_svg);
 }
 
 // ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (43 tests)
+│   │       └── integration_tests.rs  # API & golden tests (44 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
@@ -72,12 +72,12 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **178 automated tests** across five categories:
+The project includes **182 automated tests** across five categories:
 
 | Category          | Location                                      | Tests |
 | ----------------- | --------------------------------------------- | ----- |
-| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 114   |
-| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 43    |
+| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 117   |
+| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 44    |
 | CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 19    |
 | WASM unit tests   | `crates/vectize-wasm/src/lib.rs`              | 1     |
 | Doc tests         | `crates/vectize/src/lib.rs`                   | 1     |
@@ -201,6 +201,24 @@ let config = TracingConfig {
     ..TracingConfig::default()
 };
 
+let tracer = Tracer::new(config);
+let svg = tracer.trace_file("photo.jpg")?;
+```
+
+### Start from a preset and apply shared overrides
+
+```rust
+use vectize::{QualityPreset, Tracer, TracingConfig, TracingConfigOverrides};
+
+let overrides = TracingConfigOverrides {
+    color_count: Some(24),
+    background_color: Some((0x10, 0x20, 0x30)),
+    enable_svg_gradients: Some(true),
+    tile_size: Some(512),
+    ..TracingConfigOverrides::default()
+};
+
+let config = TracingConfig::from_preset_with_overrides(QualityPreset::High, &overrides)?;
 let tracer = Tracer::new(config);
 let svg = tracer.trace_file("photo.jpg")?;
 ```

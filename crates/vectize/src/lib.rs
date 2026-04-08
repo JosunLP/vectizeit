@@ -36,7 +36,7 @@ pub mod pipeline;
 pub mod progress;
 pub mod result;
 
-pub use config::{QualityPreset, TracingConfig};
+pub use config::{QualityPreset, TracingConfig, TracingConfigOverrides};
 pub use error::{Result, VectizeError};
 pub use pipeline::segment::PaletteColor;
 pub use progress::{TraceProgressUpdate, TraceStage};

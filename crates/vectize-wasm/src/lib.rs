@@ -1,6 +1,9 @@
 use js_sys::{Function, Uint8Array};
 use serde::{Deserialize, Serialize};
-use vectize::{QualityPreset, TraceProgressUpdate, TraceStageMetrics, Tracer, TracingConfig};
+use vectize::{
+    QualityPreset, TraceProgressUpdate, TraceStageMetrics, Tracer, TracingConfig,
+    TracingConfigOverrides,
+};
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -130,53 +133,35 @@ pub fn trace_bytes_with_progress(
 
 impl WasmTracingConfig {
     fn into_config(self) -> std::result::Result<TracingConfig, String> {
-        let mut config = if let Some(preset) = self.preset {
-            QualityPreset::parse(&preset)
-                .ok_or_else(|| "invalid preset; expected fast, balanced, or high".to_string())?
-                .to_config()
-        } else {
-            TracingConfig::default()
+        let preset = self
+            .preset
+            .as_deref()
+            .map(|preset| {
+                QualityPreset::parse(preset)
+                    .ok_or_else(|| "invalid preset; expected fast, balanced, or high".to_string())
+            })
+            .transpose()?
+            .unwrap_or(QualityPreset::Balanced);
+        let overrides = TracingConfigOverrides {
+            color_count: self.color_count,
+            simplification_tolerance: self.simplification_tolerance,
+            min_region_area: self.min_region_area,
+            smoothing_strength: self.smoothing_strength,
+            corner_sensitivity: self.corner_sensitivity,
+            alpha_threshold: self.alpha_threshold,
+            despeckle_threshold: self.despeckle_threshold,
+            enable_denoising: self.enable_denoising,
+            enable_preprocessing: self.enable_preprocessing,
+            background_color: self
+                .background_color
+                .as_deref()
+                .map(TracingConfig::parse_hex_color)
+                .transpose()?,
+            enable_svg_gradients: self.enable_svg_gradients,
+            tile_size: self.tile_size,
         };
 
-        if let Some(value) = self.color_count {
-            config.color_count = value;
-        }
-        if let Some(value) = self.simplification_tolerance {
-            config.simplification_tolerance = value;
-        }
-        if let Some(value) = self.min_region_area {
-            config.min_region_area = value;
-        }
-        if let Some(value) = self.smoothing_strength {
-            config.smoothing_strength = value;
-        }
-        if let Some(value) = self.corner_sensitivity {
-            config.corner_sensitivity = value;
-        }
-        if let Some(value) = self.alpha_threshold {
-            config.alpha_threshold = value;
-        }
-        if let Some(value) = self.despeckle_threshold {
-            config.despeckle_threshold = value;
-        }
-        if let Some(value) = self.enable_denoising {
-            config.enable_denoising = value;
-        }
-        if let Some(value) = self.enable_preprocessing {
-            config.enable_preprocessing = value;
-        }
-        if let Some(value) = self.background_color {
-            config.background_color = Some(TracingConfig::parse_hex_color(&value)?);
-        }
-        if let Some(value) = self.enable_svg_gradients {
-            config.enable_svg_gradients = value;
-        }
-        if let Some(value) = self.tile_size {
-            config.tile_size = Some(value);
-        }
-
-        config.validate().map_err(|error| error.to_string())?;
-        Ok(config)
+        TracingConfig::from_preset_with_overrides(preset, &overrides)
     }
 }
 

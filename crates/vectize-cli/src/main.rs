@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use log::{debug, error, info, warn};
 use rayon::prelude::*;
-use vectize::{QualityPreset, Tracer, TracingConfig};
+use vectize::{QualityPreset, Tracer, TracingConfig, TracingConfigOverrides};
 
 /// trace: high-quality raster-to-vector image tracing tool
 #[derive(Parser, Debug)]
@@ -57,6 +57,55 @@ struct ConvertArgs {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
+    #[command(flatten)]
+    trace: TraceConfigArgs,
+
+    /// Overwrite output file if it already exists
+    #[arg(long)]
+    overwrite: bool,
+
+    /// Write SVG to stdout instead of a file
+    #[arg(long)]
+    stdout: bool,
+
+    /// Enable verbose logging
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+/// Arguments for batch conversion.
+#[derive(Args, Debug)]
+struct BatchArgs {
+    /// Input directory containing image files
+    input_dir: PathBuf,
+
+    /// Output directory for SVG files
+    output_dir: PathBuf,
+
+    /// Output format (currently only SVG is supported)
+    #[arg(long, value_enum, default_value_t = OutputFormat::Svg)]
+    format: OutputFormat,
+
+    #[command(flatten)]
+    trace: TraceConfigArgs,
+
+    /// Overwrite existing output files
+    #[arg(long)]
+    overwrite: bool,
+
+    /// Enable verbose logging
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OutputFormat {
+    Svg,
+}
+
+/// Shared tracing configuration arguments for both single-file and batch conversion.
+#[derive(Args, Debug, Clone)]
+struct TraceConfigArgs {
     /// Quality preset: fast, balanced (default), or high
     #[arg(long, default_value = "balanced")]
     preset: String,
@@ -108,97 +157,6 @@ struct ConvertArgs {
     /// Process palette assignment in tiles to reduce peak segmentation memory
     #[arg(long)]
     tile_size: Option<u32>,
-
-    /// Overwrite output file if it already exists
-    #[arg(long)]
-    overwrite: bool,
-
-    /// Write SVG to stdout instead of a file
-    #[arg(long)]
-    stdout: bool,
-
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-}
-
-/// Arguments for batch conversion.
-#[derive(Args, Debug)]
-struct BatchArgs {
-    /// Input directory containing image files
-    input_dir: PathBuf,
-
-    /// Output directory for SVG files
-    output_dir: PathBuf,
-
-    /// Output format (currently only SVG is supported)
-    #[arg(long, value_enum, default_value_t = OutputFormat::Svg)]
-    format: OutputFormat,
-
-    /// Quality preset: fast, balanced (default), or high
-    #[arg(long, default_value = "balanced")]
-    preset: String,
-
-    /// Number of colors in the output palette (2–256)
-    #[arg(long)]
-    colors: Option<u16>,
-
-    /// Polygon simplification tolerance in pixels
-    #[arg(long)]
-    tolerance: Option<f64>,
-
-    /// Minimum region area in pixels to include
-    #[arg(long)]
-    min_area: Option<f64>,
-
-    /// Smoothing strength 0.0–1.0
-    #[arg(long)]
-    smoothing: Option<f64>,
-
-    /// Corner sensitivity 0.0–1.0 (higher preserves sharper corners during smoothing and curve fitting)
-    #[arg(long)]
-    corner_sensitivity: Option<f64>,
-
-    /// Alpha threshold 0–255; pixels below are transparent
-    #[arg(long)]
-    alpha_threshold: Option<u8>,
-
-    /// Minimum contour perimeter to keep during despeckling
-    #[arg(long)]
-    despeckle_threshold: Option<f64>,
-
-    /// Background color as hex (e.g. "#ff0000" or "00ff00"); default is white
-    #[arg(long)]
-    background_color: Option<String>,
-
-    /// Approximate smooth region color variation with SVG gradients
-    #[arg(long)]
-    gradients: bool,
-
-    /// Process palette assignment in tiles to reduce peak segmentation memory
-    #[arg(long)]
-    tile_size: Option<u32>,
-
-    /// Enable Gaussian denoising before tracing
-    #[arg(long)]
-    denoise: bool,
-
-    /// Disable preprocessing before tracing
-    #[arg(long)]
-    no_preprocess: bool,
-
-    /// Overwrite existing output files
-    #[arg(long)]
-    overwrite: bool,
-
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum OutputFormat {
-    Svg,
 }
 
 fn main() {
@@ -230,91 +188,45 @@ fn init_logger(verbose: bool) {
         .init();
 }
 
-fn build_config(preset_str: &str, overrides: ConfigOverrides) -> Result<TracingConfig, String> {
-    let preset = QualityPreset::parse(preset_str)
-        .ok_or_else(|| format!("Unknown preset '{preset_str}'. Use: fast, balanced, high"))?;
-
-    let mut config = preset.to_config();
-
-    if let Some(c) = overrides.colors {
-        config.color_count = c;
-    }
-    if let Some(t) = overrides.tolerance {
-        config.simplification_tolerance = t;
-    }
-    if let Some(a) = overrides.min_area {
-        config.min_region_area = a;
-    }
-    if let Some(s) = overrides.smoothing {
-        config.smoothing_strength = s;
-    }
-    if let Some(cs) = overrides.corner_sensitivity {
-        config.corner_sensitivity = cs;
-    }
-    if let Some(at) = overrides.alpha_threshold {
-        config.alpha_threshold = at;
-    }
-    if let Some(dt) = overrides.despeckle_threshold {
-        config.despeckle_threshold = dt;
-    }
-    if overrides.denoise {
-        config.enable_denoising = true;
-    }
-    if overrides.no_preprocess {
-        config.enable_preprocessing = false;
-    }
-    if let Some(ref hex) = overrides.background_color {
-        config.background_color = Some(TracingConfig::parse_hex_color(hex)?);
-    }
-    if overrides.gradients {
-        config.enable_svg_gradients = true;
-    }
-    if let Some(tile_size) = overrides.tile_size {
-        config.tile_size = Some(tile_size);
-    }
-
-    config.validate()?;
-    Ok(config)
+fn build_config(args: &TraceConfigArgs) -> Result<TracingConfig, String> {
+    let preset = QualityPreset::parse(&args.preset).ok_or_else(|| {
+        format!(
+            "Unknown preset '{}'. Use: fast, balanced, high",
+            args.preset
+        )
+    })?;
+    let overrides = trace_config_overrides(args)?;
+    TracingConfig::from_preset_with_overrides(preset, &overrides)
 }
-struct ConfigOverrides {
-    colors: Option<u16>,
-    tolerance: Option<f64>,
-    min_area: Option<f64>,
-    smoothing: Option<f64>,
-    corner_sensitivity: Option<f64>,
-    alpha_threshold: Option<u8>,
-    despeckle_threshold: Option<f64>,
-    background_color: Option<String>,
-    gradients: bool,
-    tile_size: Option<u32>,
-    denoise: bool,
-    no_preprocess: bool,
+
+fn trace_config_overrides(args: &TraceConfigArgs) -> Result<TracingConfigOverrides, String> {
+    Ok(TracingConfigOverrides {
+        color_count: args.colors,
+        simplification_tolerance: args.tolerance,
+        min_region_area: args.min_area,
+        smoothing_strength: args.smoothing,
+        corner_sensitivity: args.corner_sensitivity,
+        alpha_threshold: args.alpha_threshold,
+        despeckle_threshold: args.despeckle_threshold,
+        enable_denoising: args.denoise.then_some(true),
+        enable_preprocessing: args.no_preprocess.then_some(false),
+        background_color: args
+            .background_color
+            .as_deref()
+            .map(TracingConfig::parse_hex_color)
+            .transpose()?,
+        enable_svg_gradients: args.gradients.then_some(true),
+        tile_size: args.tile_size,
+    })
 }
 
 fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let config = build_config(
-        &args.preset,
-        ConfigOverrides {
-            colors: args.colors,
-            tolerance: args.tolerance,
-            min_area: args.min_area,
-            smoothing: args.smoothing,
-            corner_sensitivity: args.corner_sensitivity,
-            alpha_threshold: args.alpha_threshold,
-            despeckle_threshold: args.despeckle_threshold,
-            background_color: args.background_color.clone(),
-            gradients: args.gradients,
-            tile_size: args.tile_size,
-            denoise: args.denoise,
-            no_preprocess: args.no_preprocess,
-        },
-    )
-    .map_err(vectize::VectizeError::InvalidConfig)?;
+    let config = build_config(&args.trace).map_err(vectize::VectizeError::InvalidConfig)?;
 
     info!(
         "Tracing '{}' with preset '{}'",
         args.input.display(),
-        args.preset
+        args.trace.preset
     );
 
     let tracer = Tracer::new(config);
@@ -345,24 +257,7 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let config = build_config(
-        &args.preset,
-        ConfigOverrides {
-            colors: args.colors,
-            tolerance: args.tolerance,
-            min_area: args.min_area,
-            smoothing: args.smoothing,
-            corner_sensitivity: args.corner_sensitivity,
-            alpha_threshold: args.alpha_threshold,
-            despeckle_threshold: args.despeckle_threshold,
-            background_color: args.background_color.clone(),
-            gradients: args.gradients,
-            tile_size: args.tile_size,
-            denoise: args.denoise,
-            no_preprocess: args.no_preprocess,
-        },
-    )
-    .map_err(vectize::VectizeError::InvalidConfig)?;
+    let config = build_config(&args.trace).map_err(vectize::VectizeError::InvalidConfig)?;
 
     if !args.input_dir.is_dir() {
         return Err(Box::new(vectize::VectizeError::InvalidConfig(format!(
