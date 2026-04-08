@@ -62,6 +62,9 @@ fn cli_convert_help() {
     assert!(stdout.contains("--colors"));
     assert!(stdout.contains("--corner-sensitivity"));
     assert!(stdout.contains("--despeckle-threshold"));
+    assert!(stdout.contains("--background-color"));
+    assert!(stdout.contains("--gradients"));
+    assert!(stdout.contains("--tile-size"));
     assert!(stdout.contains("--stdout"));
 }
 
@@ -74,6 +77,7 @@ fn cli_batch_help() {
     assert!(stdout.contains("Output directory"));
     assert!(stdout.contains("--format"));
     assert!(stdout.contains("--preset"));
+    assert!(stdout.contains("--background-color"));
     assert!(stdout.contains("--overwrite"));
 }
 
@@ -189,6 +193,9 @@ fn cli_convert_with_options() {
             "100",
             "--despeckle-threshold",
             "1.5",
+            "--gradients",
+            "--tile-size",
+            "8",
             "--no-preprocess",
         ])
         .output()
@@ -201,6 +208,32 @@ fn cli_convert_with_options() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("<svg"));
+
+    let _ = std::fs::remove_file(&png);
+}
+
+#[test]
+fn cli_convert_with_background_color() {
+    let png = create_test_png("cli_test_background_color.png");
+
+    let output = trace_bin()
+        .args([
+            "convert",
+            png.to_str().unwrap(),
+            "--stdout",
+            "--background-color",
+            "102030",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(r##"fill="#102030""##));
 
     let _ = std::fs::remove_file(&png);
 }
@@ -274,6 +307,26 @@ fn cli_convert_invalid_preset() {
             "--stdout",
             "--preset",
             "ultra",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+
+    let _ = std::fs::remove_file(&png);
+}
+
+#[test]
+fn cli_convert_invalid_background_color() {
+    let png = create_test_png("cli_test_invalid_background_color.png");
+
+    let output = trace_bin()
+        .args([
+            "convert",
+            png.to_str().unwrap(),
+            "--stdout",
+            "--background-color",
+            "not-a-color",
         ])
         .output()
         .unwrap();

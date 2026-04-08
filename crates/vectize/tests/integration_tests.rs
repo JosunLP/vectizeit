@@ -5,7 +5,7 @@
 
 use image::{ImageBuffer, ImageFormat, Rgba, RgbaImage};
 use std::io::Cursor;
-use vectize::{QualityPreset, Tracer, TracingConfig, VectizeError};
+use vectize::{QualityPreset, TraceStage, Tracer, TracingConfig, VectizeError};
 
 /// Helper: create a solid-color RGBA image of the given size and color.
 fn make_solid_image(width: u32, height: u32, color: Rgba<u8>) -> RgbaImage {
@@ -211,6 +211,8 @@ fn trace_bytes_emits_smaller_detail_after_larger_background() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
@@ -243,6 +245,8 @@ fn trace_bytes_omits_border_connected_white_path() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
@@ -279,6 +283,8 @@ fn trace_bytes_keeps_interior_white_island_when_background_is_white() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
@@ -319,6 +325,8 @@ fn trace_bytes_stage_metrics_report_svg_filtered_contours() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
@@ -353,6 +361,8 @@ fn trace_bytes_uses_two_decimal_coordinate_precision() {
             enable_preprocessing: true,
             quality_preset: QualityPreset::Balanced,
             background_color: None,
+            enable_svg_gradients: false,
+            tile_size: None,
         };
 
         let svg = Tracer::new(config).trace_bytes(&bytes).unwrap();
@@ -385,6 +395,8 @@ fn trace_bytes_smoothing_keeps_edge_touching_coordinates_inside_viewbox() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
@@ -423,6 +435,8 @@ fn trace_bytes_corner_sensitive_smoothing_preserves_more_region_extent() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
     let high_corner_config = TracingConfig {
         corner_sensitivity: 1.0,
@@ -455,6 +469,176 @@ fn trace_bytes_corner_sensitive_smoothing_preserves_more_region_extent() {
         high_bounds.max_y >= low_bounds.max_y,
         "higher corner sensitivity should keep the bottom edge from drifting inward"
     );
+}
+
+#[test]
+fn trace_bytes_large_region_smoothing_keeps_bounds_close_to_unsmoothed_shape() {
+    let img = ImageBuffer::from_fn(32, 32, |x, y| {
+        if (4..=27).contains(&x) && (4..=27).contains(&y) {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let base_config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+        background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
+    };
+    let smoothed_config = TracingConfig {
+        smoothing_strength: 1.0,
+        corner_sensitivity: 0.0,
+        ..base_config.clone()
+    };
+
+    let base_result = Tracer::new(base_config).trace_bytes_result(&bytes).unwrap();
+    let smoothed_result = Tracer::new(smoothed_config)
+        .trace_bytes_result(&bytes)
+        .unwrap();
+
+    let base_bounds = path_bounds(&extract_path_coordinate_pairs(base_result.svg()));
+    let smoothed_bounds = path_bounds(&extract_path_coordinate_pairs(smoothed_result.svg()));
+
+    assert!(
+        smoothed_bounds.min_x <= base_bounds.min_x + 0.75,
+        "area-preserving smoothing should keep the left edge close to the unsmoothed footprint"
+    );
+    assert!(
+        smoothed_bounds.min_y <= base_bounds.min_y + 0.75,
+        "area-preserving smoothing should keep the top edge close to the unsmoothed footprint"
+    );
+    assert!(
+        smoothed_bounds.max_x >= base_bounds.max_x - 0.75,
+        "area-preserving smoothing should keep the right edge close to the unsmoothed footprint"
+    );
+    assert!(
+        smoothed_bounds.max_y >= base_bounds.max_y - 0.75,
+        "area-preserving smoothing should keep the bottom edge close to the unsmoothed footprint"
+    );
+}
+
+#[test]
+fn trace_bytes_with_progress_reports_stage_completions() {
+    let img = make_solid_image(8, 8, Rgba([180, 40, 60, 255]));
+    let bytes = encode_png(&img);
+    let tracer = Tracer::with_preset(QualityPreset::Balanced);
+    let mut stages = Vec::new();
+
+    tracer
+        .trace_bytes_result_with_progress(&bytes, |update| {
+            stages.push(update.stage());
+        })
+        .unwrap();
+
+    assert_eq!(stages.first().copied(), Some(TraceStage::Loaded));
+    assert_eq!(stages.last().copied(), Some(TraceStage::Completed));
+    assert!(stages.contains(&TraceStage::Quantized));
+    assert!(stages.contains(&TraceStage::SvgGenerated));
+}
+
+#[test]
+fn trace_bytes_with_gradients_emits_svg_gradient_definitions() {
+    let img = ImageBuffer::from_fn(64, 32, |x, y| {
+        let t = x as f32 / 63.0;
+        let r = (255.0 * t).round() as u8;
+        let g = (64.0 + (y as f32 / 31.0) * 64.0).round() as u8;
+        let b = (255.0 * (1.0 - t)).round() as u8;
+        Rgba([r, g, b, 255])
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 8,
+        enable_svg_gradients: true,
+        ..QualityPreset::Balanced.to_config()
+    };
+
+    let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
+
+    assert!(
+        result.svg().contains("<linearGradient") || result.svg().contains("<radialGradient"),
+        "gradient-enabled tracing should emit SVG paint definitions"
+    );
+    assert!(result.svg().contains("fill=\"url(#grad-"));
+}
+
+#[test]
+fn trace_bytes_tiled_matches_untiled_for_small_inputs() {
+    let img = ImageBuffer::from_fn(24, 24, |x, y| {
+        let value = ((x * 11) + (y * 17)) as u8;
+        Rgba([value, value.wrapping_mul(3), value.wrapping_mul(5), 255])
+    });
+    let bytes = encode_png(&img);
+
+    let base = Tracer::new(TracingConfig {
+        color_count: 6,
+        ..TracingConfig::default()
+    })
+    .trace_bytes(&bytes)
+    .unwrap();
+    let tiled = Tracer::new(TracingConfig {
+        color_count: 6,
+        tile_size: Some(8),
+        ..TracingConfig::default()
+    })
+    .trace_bytes(&bytes)
+    .unwrap();
+
+    assert_eq!(base, tiled);
+}
+
+#[test]
+fn trace_bytes_with_custom_background_color_uses_rect_and_suppresses_redundant_region() {
+    let img = ImageBuffer::from_fn(12, 12, |x, y| {
+        if (3..=8).contains(&x) && (3..=8).contains(&y) {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 0, 0])
+        }
+    });
+    let bytes = encode_png(&img);
+
+    let config = TracingConfig {
+        color_count: 2,
+        simplification_tolerance: 0.0,
+        min_region_area: 0.0,
+        smoothing_strength: 0.0,
+        corner_sensitivity: 0.6,
+        alpha_threshold: 128,
+        despeckle_threshold: 0.0,
+        enable_denoising: false,
+        enable_preprocessing: true,
+        quality_preset: QualityPreset::Balanced,
+        background_color: Some((0x12, 0x34, 0x56)),
+        enable_svg_gradients: false,
+        tile_size: None,
+    };
+
+    let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
+    let metrics = result
+        .stage_metrics()
+        .expect("stage metrics should be present");
+
+    assert!(result
+        .svg()
+        .contains(r##"<rect width="12" height="12" fill="#123456""##));
+    assert!(result.svg().contains(r##"fill="#000000""##));
+    assert_eq!(result.svg().matches(r##"fill="#123456""##).count(), 1);
+    assert_eq!(result.svg().matches("<path").count(), 1);
+    assert!(metrics.contours_suppressed_background() >= 1);
+    assert_eq!(metrics.regions_emitted(), 1);
 }
 
 #[test]
@@ -513,6 +697,8 @@ fn trace_bytes_custom_config() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::High,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let tracer = Tracer::new(config);
@@ -573,6 +759,8 @@ fn trace_bytes_ring_image_preserves_hole() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let tracer = Tracer::new(config);
@@ -624,6 +812,8 @@ fn trace_bytes_result_reports_bezier_emitted_points() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let tracer = Tracer::new(config);
@@ -657,6 +847,8 @@ fn trace_bytes_result_uses_closed_beziers_for_closed_contours() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let tracer = Tracer::new(config);
@@ -981,6 +1173,8 @@ fn trace_bytes_result_preserves_small_accent_palette_color() {
         enable_preprocessing: true,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();
@@ -1023,6 +1217,8 @@ fn trace_bytes_result_collapses_antialias_bridge_palette_color_for_flat_art() {
         enable_preprocessing: false,
         quality_preset: QualityPreset::Balanced,
         background_color: None,
+        enable_svg_gradients: false,
+        tile_size: None,
     };
 
     let result = Tracer::new(config).trace_bytes_result(&bytes).unwrap();

@@ -1,5 +1,5 @@
-//! Color segmentation using median-cut color quantization with deterministic
-//! palette refinement.
+//! Color segmentation using perceptual Oklab palette quantization with
+//! deterministic refinement.
 //!
 //! Reduces the image to a fixed palette and produces a labeled pixel map
 //! where each pixel is assigned a color index.
@@ -9,6 +9,9 @@ use std::collections::{HashMap, VecDeque};
 use image::{ImageBuffer, Rgba};
 
 use crate::config::{QualityPreset, TracingConfig};
+use crate::pipeline::color::{
+    linear_rgb_to_srgb, oklab_distance_sq, srgb_to_linear_rgb, srgb_to_oklab, OklabColor,
+};
 
 const STRONG_ADAPTIVE_FLAT_ART_COLOR_CAP: usize = 12;
 const STRONG_ADAPTIVE_FLAT_ART_COVERAGE_NUMERATOR: u32 = 17;
@@ -34,13 +37,15 @@ const BRIDGE_LABEL_RARITY_RATIO: u32 = 3;
 const BRIDGE_LABEL_DOMINANT_ADJACENCY_NUMERATOR: u32 = 4;
 const BRIDGE_LABEL_DOMINANT_ADJACENCY_DENOMINATOR: u32 = 5;
 const PALETTE_REFINEMENT_CYCLES: usize = 3;
+const TILED_PALETTE_SAMPLE_LIMIT: usize = 131_072;
+const PERCEPTUAL_DISTANCE_EPSILON: f64 = 1e-12;
 const TINY_COMPONENT_CLEANUP_PASSES: usize = 2;
 const HIGH_DETAIL_TINY_COMPONENT_PALETTE_MIN: usize = 16;
 const HIGH_DETAIL_TINY_COMPONENT_MAX_AREA: usize = 32;
 const AMBIGUOUS_TINY_COMPONENT_MAX_AREA: usize = 4;
 
 /// An entry in the color palette.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PaletteColor {
     pub r: u8,
     pub g: u8,
@@ -84,6 +89,110 @@ impl PaletteAccumulator {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct PerceptualAccumulator {
+    sum_r: f64,
+    sum_g: f64,
+    sum_b: f64,
+    count: f64,
+}
+
+impl PerceptualAccumulator {
+    fn push(&mut self, pixel: [u8; 3]) {
+        let linear = srgb_to_linear_rgb(pixel);
+        self.sum_r += linear[0];
+        self.sum_g += linear[1];
+        self.sum_b += linear[2];
+        self.count += 1.0;
+    }
+
+    fn average_or(self, fallback: [u8; 3]) -> [u8; 3] {
+        if self.count <= f64::EPSILON {
+            return fallback;
+        }
+
+        linear_rgb_to_srgb([
+            self.sum_r / self.count,
+            self.sum_g / self.count,
+            self.sum_b / self.count,
+        ])
+    }
+}
+
+trait PixelSource {
+    fn len(&self) -> usize;
+    fn pixel(&self, index: usize) -> [u8; 3];
+}
+
+impl PixelSource for [[u8; 3]] {
+    fn len(&self) -> usize {
+        <[[u8; 3]]>::len(self)
+    }
+
+    fn pixel(&self, index: usize) -> [u8; 3] {
+        self[index]
+    }
+}
+
+impl PixelSource for Vec<[u8; 3]> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn pixel(&self, index: usize) -> [u8; 3] {
+        self[index]
+    }
+}
+
+struct SlicePixelSource<'a> {
+    pixels: &'a [[u8; 3]],
+}
+
+impl PixelSource for SlicePixelSource<'_> {
+    fn len(&self) -> usize {
+        self.pixels.len()
+    }
+
+    fn pixel(&self, index: usize) -> [u8; 3] {
+        self.pixels[index]
+    }
+}
+
+struct ImagePixelSource<'a> {
+    img: &'a ImageBuffer<Rgba<u8>, Vec<u8>>,
+    width: usize,
+    alpha_threshold: u8,
+}
+
+impl<'a> ImagePixelSource<'a> {
+    fn new(img: &'a ImageBuffer<Rgba<u8>, Vec<u8>>, alpha_threshold: u8) -> Self {
+        Self {
+            img,
+            width: img.width() as usize,
+            alpha_threshold,
+        }
+    }
+}
+
+impl PixelSource for ImagePixelSource<'_> {
+    fn len(&self) -> usize {
+        self.width * self.img.height() as usize
+    }
+
+    fn pixel(&self, index: usize) -> [u8; 3] {
+        let x = (index % self.width) as u32;
+        let y = (index / self.width) as u32;
+        composite_pixel(self.img.get_pixel(x, y).0, self.alpha_threshold)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HistogramEntry {
+    rgb: [u8; 3],
+    lab: OklabColor,
+    count: u32,
+}
+
 struct ComponentBridgeContext<'a> {
     labels: &'a [u8],
     width: usize,
@@ -105,13 +214,42 @@ pub struct SegmentationResult {
     pub height: u32,
 }
 
-/// Quantize the image colors using a median-cut seed palette, refine it through
-/// deterministic reassignment passes, and assign each pixel a palette index.
+/// Quantize the image colors using a deterministic perceptual palette and
+/// assign each pixel a palette index.
 pub fn quantize(
     img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     config: &TracingConfig,
 ) -> SegmentationResult {
     let (width, height) = img.dimensions();
+
+    if let Some(tile_size) = config.tile_size {
+        let sample_pixels = collect_palette_samples(img, config.alpha_threshold);
+        let max_colors = adaptive_color_budget(&sample_pixels, config.color_count.max(2) as usize);
+
+        let mut result = quantize_tiled_with_budget(
+            img,
+            &sample_pixels,
+            width,
+            height,
+            max_colors,
+            config,
+            tile_size,
+        );
+
+        if let Some(flat_art_cap) = flat_art_rerun_cap(&result.labels, result.palette.len()) {
+            result = quantize_tiled_with_budget(
+                img,
+                &sample_pixels,
+                width,
+                height,
+                flat_art_cap,
+                config,
+                tile_size,
+            );
+        }
+
+        return result;
+    }
 
     let pixels = collect_pixels(img, config.alpha_threshold);
     let max_colors = adaptive_color_budget(&pixels, config.color_count.max(2) as usize);
@@ -132,22 +270,65 @@ fn quantize_with_budget(
     max_colors: usize,
     config: &TracingConfig,
 ) -> SegmentationResult {
-    let palette = deduplicate_palette(refine_palette(
+    let palette = deduplicate_palette(refine_palette_perceptual(
         pixels,
-        &median_cut(pixels, max_colors),
+        &seed_perceptual_palette(pixels, max_colors),
         PALETTE_REFINEMENT_CYCLES,
     ));
-    let mut labels = assign_rgb_labels(pixels, &palette);
-    cleanup_antialias_fringes(pixels, &mut labels, &palette, width, height);
-    collapse_bridge_palette_labels(pixels, &mut labels, &palette, width, height);
+    let mut labels = assign_palette_labels(pixels, &palette);
+    let pixel_source = SlicePixelSource { pixels };
+    cleanup_antialias_fringes(&pixel_source, &mut labels, &palette, width, height);
+    collapse_bridge_palette_labels(&pixel_source, &mut labels, &palette, width, height);
     cleanup_tiny_label_components(
-        pixels,
+        &pixel_source,
         &mut labels,
         &palette,
         width,
         height,
         tiny_component_cleanup_area_threshold(config, palette.len()),
     );
+    let compact_palette = compact_palette(&mut labels, &palette);
+    let palette_colors: Vec<PaletteColor> = compact_palette
+        .iter()
+        .map(|&[r, g, b]| PaletteColor { r, g, b })
+        .collect();
+
+    SegmentationResult {
+        palette: palette_colors,
+        labels,
+        width,
+        height,
+    }
+}
+
+fn quantize_tiled_with_budget(
+    img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    sample_pixels: &[[u8; 3]],
+    width: u32,
+    height: u32,
+    max_colors: usize,
+    config: &TracingConfig,
+    tile_size: u32,
+) -> SegmentationResult {
+    let palette = deduplicate_palette(refine_palette_perceptual(
+        sample_pixels,
+        &seed_perceptual_palette(sample_pixels, max_colors),
+        PALETTE_REFINEMENT_CYCLES,
+    ));
+    let mut labels = assign_image_labels_tiled(img, config.alpha_threshold, &palette, tile_size);
+    let pixel_source = ImagePixelSource::new(img, config.alpha_threshold);
+
+    cleanup_antialias_fringes(&pixel_source, &mut labels, &palette, width, height);
+    collapse_bridge_palette_labels(&pixel_source, &mut labels, &palette, width, height);
+    cleanup_tiny_label_components(
+        &pixel_source,
+        &mut labels,
+        &palette,
+        width,
+        height,
+        tiny_component_cleanup_area_threshold(config, palette.len()),
+    );
+
     let compact_palette = compact_palette(&mut labels, &palette);
     let palette_colors: Vec<PaletteColor> = compact_palette
         .iter()
@@ -177,15 +358,48 @@ fn tiny_component_cleanup_area_threshold(config: &TracingConfig, palette_len: us
 
 fn collect_pixels(img: &ImageBuffer<Rgba<u8>, Vec<u8>>, alpha_threshold: u8) -> Vec<[u8; 3]> {
     img.pixels()
-        .map(|px| {
-            let [r, g, b, a] = px.0;
-            if a >= alpha_threshold {
-                [r, g, b]
-            } else {
-                [255u8, 255u8, 255u8]
-            }
-        })
+        .map(|px| composite_pixel(px.0, alpha_threshold))
         .collect()
+}
+
+fn collect_palette_samples(
+    img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    alpha_threshold: u8,
+) -> Vec<[u8; 3]> {
+    let (width, height) = img.dimensions();
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let total_pixels = width as usize * height as usize;
+    let sample_ratio = total_pixels.div_ceil(TILED_PALETTE_SAMPLE_LIMIT);
+    let stride = (sample_ratio as f64).sqrt().ceil().max(1.0) as usize;
+    let mut samples =
+        Vec::with_capacity((width as usize / stride + 1) * (height as usize / stride + 1));
+
+    for y in (0..height as usize).step_by(stride) {
+        for x in (0..width as usize).step_by(stride) {
+            samples.push(composite_pixel(
+                img.get_pixel(x as u32, y as u32).0,
+                alpha_threshold,
+            ));
+        }
+    }
+
+    if samples.is_empty() {
+        samples.push(composite_pixel(img.get_pixel(0, 0).0, alpha_threshold));
+    }
+
+    samples
+}
+
+fn composite_pixel(pixel: [u8; 4], alpha_threshold: u8) -> [u8; 3] {
+    let [r, g, b, a] = pixel;
+    if a >= alpha_threshold {
+        [r, g, b]
+    } else {
+        [255, 255, 255]
+    }
 }
 
 fn adaptive_color_budget(pixels: &[[u8; 3]], requested_max_colors: usize) -> usize {
@@ -292,15 +506,50 @@ fn qualifies_for_flat_art_cap(
         && tail_peak * ADAPTIVE_FLAT_ART_TAIL_SHARE_RATIO <= total
 }
 
-fn assign_rgb_labels(pixels: &[[u8; 3]], palette: &[[u8; 3]]) -> Vec<u8> {
+fn assign_palette_labels(pixels: &[[u8; 3]], palette: &[[u8; 3]]) -> Vec<u8> {
+    let palette_labs = build_palette_labs(palette);
+
     pixels
         .iter()
-        .map(|&pixel| nearest_rgb_palette_index(pixel, palette) as u8)
+        .map(|&pixel| nearest_palette_index(pixel, &palette_labs) as u8)
         .collect()
 }
 
-fn cleanup_antialias_fringes(
-    pixels: &[[u8; 3]],
+fn assign_image_labels_tiled(
+    img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    alpha_threshold: u8,
+    palette: &[[u8; 3]],
+    tile_size: u32,
+) -> Vec<u8> {
+    let width = img.width() as usize;
+    let height = img.height() as usize;
+    let tile_size = tile_size.max(2) as usize;
+    let palette_labs = build_palette_labs(palette);
+    let mut labels = vec![0u8; width * height];
+
+    for tile_y in (0..height).step_by(tile_size) {
+        let end_y = (tile_y + tile_size).min(height);
+
+        for tile_x in (0..width).step_by(tile_size) {
+            let end_x = (tile_x + tile_size).min(width);
+
+            for y in tile_y..end_y {
+                for x in tile_x..end_x {
+                    let index = y * width + x;
+                    labels[index] = nearest_palette_index(
+                        composite_pixel(img.get_pixel(x as u32, y as u32).0, alpha_threshold),
+                        &palette_labs,
+                    ) as u8;
+                }
+            }
+        }
+    }
+
+    labels
+}
+
+fn cleanup_antialias_fringes<P: PixelSource + ?Sized>(
+    pixels: &P,
     labels: &mut [u8],
     palette: &[[u8; 3]],
     width: u32,
@@ -362,7 +611,7 @@ fn cleanup_antialias_fringes(
                 }
 
                 let replacement = choose_bridge_replacement(
-                    pixels[index],
+                    pixels.pixel(index),
                     primary_label,
                     primary_support,
                     secondary_label,
@@ -386,8 +635,8 @@ fn cleanup_antialias_fringes(
     }
 }
 
-fn collapse_bridge_palette_labels(
-    pixels: &[[u8; 3]],
+fn collapse_bridge_palette_labels<P: PixelSource + ?Sized>(
+    pixels: &P,
     labels: &mut [u8],
     palette: &[[u8; 3]],
     width: u32,
@@ -475,7 +724,7 @@ fn collapse_bridge_palette_labels(
                 };
 
                 let replacement =
-                    choose_component_bridge_replacement(pixels[index], x, y, &context);
+                    choose_component_bridge_replacement(pixels.pixel(index), x, y, &context);
 
                 if replacement != labels[index] {
                     labels[index] = replacement;
@@ -490,8 +739,8 @@ fn collapse_bridge_palette_labels(
     }
 }
 
-fn cleanup_tiny_label_components(
-    pixels: &[[u8; 3]],
+fn cleanup_tiny_label_components<P: PixelSource + ?Sized>(
+    pixels: &P,
     labels: &mut [u8],
     palette: &[[u8; 3]],
     width: u32,
@@ -534,7 +783,7 @@ fn cleanup_tiny_label_components(
                 component_area += 1;
                 if track_component {
                     component_pixels.push(index);
-                    component_accumulator.push(pixels[index]);
+                    component_accumulator.push(pixels.pixel(index));
                     if component_area > max_component_area {
                         track_component = false;
                         component_pixels.clear();
@@ -663,7 +912,7 @@ fn choose_tiny_component_replacement(
 ) -> Option<u8> {
     let mut best_label = None;
     let mut best_support = 0u16;
-    let mut best_distance = u32::MAX;
+    let mut best_distance = f64::INFINITY;
 
     for (label_index, &support) in boundary_counts.iter().enumerate() {
         if label_index == current_label as usize || support == 0 {
@@ -856,18 +1105,23 @@ fn compact_palette(labels: &mut [u8], palette: &[[u8; 3]]) -> Vec<[u8; 3]> {
     compact
 }
 
-fn refine_palette(pixels: &[[u8; 3]], seed_palette: &[[u8; 3]], cycles: usize) -> Vec<[u8; 3]> {
+fn refine_palette_perceptual(
+    pixels: &[[u8; 3]],
+    seed_palette: &[[u8; 3]],
+    cycles: usize,
+) -> Vec<[u8; 3]> {
     if pixels.is_empty() || seed_palette.is_empty() || cycles == 0 {
         return seed_palette.to_vec();
     }
 
     let mut palette = seed_palette.to_vec();
+    let mut palette_labs = build_palette_labs(&palette);
 
     for _ in 0..cycles {
-        let mut accumulators = vec![PaletteAccumulator::default(); palette.len()];
+        let mut accumulators = vec![PerceptualAccumulator::default(); palette.len()];
 
         for &pixel in pixels {
-            let index = nearest_rgb_palette_index(pixel, &palette);
+            let index = nearest_palette_index(pixel, &palette_labs);
             accumulators[index].push(pixel);
         }
 
@@ -883,16 +1137,27 @@ fn refine_palette(pixels: &[[u8; 3]], seed_palette: &[[u8; 3]], cycles: usize) -
         }
 
         palette = next_palette;
+        palette_labs = build_palette_labs(&palette);
     }
 
     palette
 }
 
-fn nearest_rgb_palette_index(pixel: [u8; 3], palette: &[[u8; 3]]) -> usize {
-    palette
+fn build_palette_labs(palette: &[[u8; 3]]) -> Vec<OklabColor> {
+    palette.iter().copied().map(srgb_to_oklab).collect()
+}
+
+fn nearest_palette_index(pixel: [u8; 3], palette_labs: &[OklabColor]) -> usize {
+    let pixel_lab = srgb_to_oklab(pixel);
+
+    palette_labs
         .iter()
         .enumerate()
-        .min_by_key(|(_, &candidate)| color_distance_sq(pixel, candidate))
+        .min_by(|(left_index, left), (right_index, right)| {
+            oklab_distance_sq(pixel_lab, **left)
+                .total_cmp(&oklab_distance_sq(pixel_lab, **right))
+                .then_with(|| left_index.cmp(right_index))
+        })
         .map(|(index, _)| index)
         .unwrap_or(0)
 }
@@ -909,15 +1174,8 @@ fn deduplicate_palette(palette: Vec<[u8; 3]>) -> Vec<[u8; 3]> {
     unique
 }
 
-fn color_distance_sq(left: [u8; 3], right: [u8; 3]) -> u32 {
-    let red_mean = (left[0] as u32 + right[0] as u32) / 2;
-    let dr = left[0] as i32 - right[0] as i32;
-    let dg = left[1] as i32 - right[1] as i32;
-    let db = left[2] as i32 - right[2] as i32;
-
-    ((((512 + red_mean) as i64 * (dr * dr) as i64) >> 8)
-        + (4 * (dg * dg) as i64)
-        + ((((767 - red_mean) as i64) * (db * db) as i64) >> 8)) as u32
+fn color_distance_sq(left: [u8; 3], right: [u8; 3]) -> f64 {
+    oklab_distance_sq(srgb_to_oklab(left), srgb_to_oklab(right))
 }
 
 fn euclidean_color_distance_sq(left: [u8; 3], right: [u8; 3]) -> f64 {
@@ -960,76 +1218,84 @@ fn color_distance_to_segment_sq(point: [u8; 3], start: [u8; 3], end: [u8; 3]) ->
     (dr * dr) + (dg * dg) + (db * db)
 }
 
-/// Recursive median-cut color quantization.
-/// Returns at most `max_colors` representative colors.
-fn median_cut(pixels: &[[u8; 3]], max_colors: usize) -> Vec<[u8; 3]> {
+fn seed_perceptual_palette(pixels: &[[u8; 3]], max_colors: usize) -> Vec<[u8; 3]> {
     if pixels.is_empty() {
         return vec![[255, 255, 255]];
     }
-    let mut buckets: Vec<Vec<[u8; 3]>> = vec![pixels.to_vec()];
 
-    while buckets.len() < max_colors {
-        // Find the bucket with the largest range in any channel
-        let Some(split_idx) = buckets
+    let entries = histogram_entries(pixels);
+    if entries.len() <= max_colors {
+        return entries.iter().map(|entry| entry.rgb).collect();
+    }
+
+    let mut palette = Vec::with_capacity(max_colors);
+    let mut selected = vec![false; entries.len()];
+    let mut nearest_distances = vec![f64::INFINITY; entries.len()];
+
+    palette.push(entries[0].rgb);
+    selected[0] = true;
+
+    for (index, entry) in entries.iter().enumerate() {
+        nearest_distances[index] = oklab_distance_sq(entry.lab, entries[0].lab);
+    }
+
+    while palette.len() < max_colors {
+        let Some((next_index, _)) = entries
             .iter()
             .enumerate()
-            .max_by_key(|(_, b)| channel_range(b))
-            .map(|(i, _)| i)
+            .filter(|(index, _)| !selected[*index])
+            .max_by(|(left_index, left), (right_index, right)| {
+                let left_score = nearest_distances[*left_index] * f64::from(left.count);
+                let right_score = nearest_distances[*right_index] * f64::from(right.count);
+
+                left_score
+                    .total_cmp(&right_score)
+                    .then_with(|| left.count.cmp(&right.count))
+                    .then_with(|| right.rgb.cmp(&left.rgb))
+            })
         else {
             break;
         };
 
-        let bucket = buckets.remove(split_idx);
-        if bucket.len() < 2 {
-            buckets.push(bucket);
+        if nearest_distances[next_index] <= PERCEPTUAL_DISTANCE_EPSILON {
             break;
         }
 
-        let ch = widest_channel(&bucket);
-        let mut sorted = bucket;
-        sorted.sort_unstable_by_key(|px| px[ch]);
-        let mid = sorted.len() / 2;
-        let (left, right) = sorted.split_at(mid);
-        buckets.push(left.to_vec());
-        buckets.push(right.to_vec());
-    }
+        selected[next_index] = true;
+        palette.push(entries[next_index].rgb);
 
-    buckets.iter().map(|b| average_color(b)).collect()
-}
-
-fn channel_range(pixels: &[[u8; 3]]) -> u32 {
-    let mut min = [255u8; 3];
-    let mut max = [0u8; 3];
-    for px in pixels {
-        for c in 0..3 {
-            min[c] = min[c].min(px[c]);
-            max[c] = max[c].max(px[c]);
+        for (index, entry) in entries.iter().enumerate() {
+            nearest_distances[index] =
+                nearest_distances[index].min(oklab_distance_sq(entry.lab, entries[next_index].lab));
         }
     }
-    (0..3).map(|c| (max[c] - min[c]) as u32).sum()
+
+    palette
 }
 
-fn widest_channel(pixels: &[[u8; 3]]) -> usize {
-    let mut min = [255u8; 3];
-    let mut max = [0u8; 3];
-    for px in pixels {
-        for c in 0..3 {
-            min[c] = min[c].min(px[c]);
-            max[c] = max[c].max(px[c]);
-        }
+fn histogram_entries(pixels: &[[u8; 3]]) -> Vec<HistogramEntry> {
+    let mut histogram: HashMap<[u8; 3], u32> = HashMap::new();
+    for &pixel in pixels {
+        *histogram.entry(pixel).or_default() += 1;
     }
-    (0..3).max_by_key(|&c| max[c] - min[c]).unwrap_or(0)
-}
 
-fn average_color(pixels: &[[u8; 3]]) -> [u8; 3] {
-    if pixels.is_empty() {
-        return [255, 255, 255];
-    }
-    let n = pixels.len() as u32;
-    let (sr, sg, sb) = pixels.iter().fold((0u32, 0u32, 0u32), |(sr, sg, sb), px| {
-        (sr + px[0] as u32, sg + px[1] as u32, sb + px[2] as u32)
+    let mut entries: Vec<HistogramEntry> = histogram
+        .into_iter()
+        .map(|(rgb, count)| HistogramEntry {
+            rgb,
+            lab: srgb_to_oklab(rgb),
+            count,
+        })
+        .collect();
+
+    entries.sort_unstable_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.rgb.cmp(&right.rgb))
     });
-    [(sr / n) as u8, (sg / n) as u8, (sb / n) as u8]
+
+    entries
 }
 
 #[cfg(test)]
@@ -1101,6 +1367,54 @@ mod tests {
 
         assert_eq!(first.palette, second.palette);
         assert_eq!(first.labels, second.labels);
+    }
+
+    #[test]
+    fn quantize_tiled_matches_untiled_for_small_images() {
+        let img = ImageBuffer::from_fn(12, 12, |x, y| {
+            let value = ((x * 21) + (y * 13)) as u8;
+            Rgba([value, value.wrapping_mul(3), value.wrapping_mul(5), 255])
+        });
+
+        let untiled = quantize(
+            &img,
+            &TracingConfig {
+                color_count: 6,
+                ..TracingConfig::default()
+            },
+        );
+        let tiled = quantize(
+            &img,
+            &TracingConfig {
+                color_count: 6,
+                tile_size: Some(4),
+                ..TracingConfig::default()
+            },
+        );
+
+        assert_eq!(untiled.palette, tiled.palette);
+        assert_eq!(untiled.labels, tiled.labels);
+    }
+
+    #[test]
+    fn seed_perceptual_palette_preserves_distinct_lightness_clusters() {
+        let pixels = vec![[20, 20, 24]; 32]
+            .into_iter()
+            .chain(vec![[128, 128, 134]; 32])
+            .chain(vec![[236, 236, 240]; 32])
+            .collect::<Vec<_>>();
+
+        let palette = seed_perceptual_palette(&pixels, 3);
+        let mut luminances: Vec<u16> = palette
+            .iter()
+            .map(|color| u16::from(color[0]) + u16::from(color[1]) + u16::from(color[2]))
+            .collect();
+        luminances.sort_unstable();
+
+        assert_eq!(palette.len(), 3);
+        assert!(luminances[0] < 100);
+        assert!(luminances[1] > 300 && luminances[1] < 450);
+        assert!(luminances[2] > 650);
     }
 
     #[test]

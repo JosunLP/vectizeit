@@ -4,9 +4,12 @@
 //! elements, deterministic output, and fixed coordinate precision across
 //! linear and Bezier path serialization.
 
+use rayon::prelude::*;
+
 use crate::config::TracingConfig;
 use crate::pipeline::contour::{contour_is_hole, signed_area, Contour, Point};
 use crate::pipeline::curves::{fit_closed_cubic_beziers_f64, CubicBezier};
+use crate::pipeline::gradient::{SvgGradientKind, SvgGradientPaintMap};
 use crate::pipeline::segment::PaletteColor;
 use crate::pipeline::simplify::{simplify_closed, simplify_closed_f64};
 use crate::pipeline::smooth::smooth_closed_contour_adaptive_multi;
@@ -72,6 +75,13 @@ struct OrderedRegion<'a> {
     region: &'a ColorRegion,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrderedRegionOutput {
+    color: PaletteColor,
+    hex: String,
+    result: RegionBuildResult,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RegionPathPlan {
     contour_groups: Vec<Vec<usize>>,
@@ -120,9 +130,29 @@ pub(crate) fn generate_svg_with_metrics(
     height: u32,
     config: &TracingConfig,
 ) -> SvgBuildResult {
-    generate_svg_with_trace_space(regions, width, height, width, height, 1.0, config)
+    generate_svg_with_metrics_and_paints(regions, width, height, config, None)
 }
 
+pub(crate) fn generate_svg_with_metrics_and_paints(
+    regions: &[ColorRegion],
+    width: u32,
+    height: u32,
+    config: &TracingConfig,
+    gradient_paints: Option<&SvgGradientPaintMap>,
+) -> SvgBuildResult {
+    generate_svg_with_trace_space_and_paints(
+        regions,
+        width,
+        height,
+        width,
+        height,
+        1.0,
+        config,
+        gradient_paints,
+    )
+}
+
+#[allow(dead_code)]
 pub(crate) fn generate_svg_with_trace_space(
     regions: &[ColorRegion],
     trace_width: u32,
@@ -132,11 +162,43 @@ pub(crate) fn generate_svg_with_trace_space(
     coordinate_scale: f64,
     config: &TracingConfig,
 ) -> SvgBuildResult {
+    generate_svg_with_trace_space_and_paints(
+        regions,
+        trace_width,
+        trace_height,
+        output_width,
+        output_height,
+        coordinate_scale,
+        config,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_svg_with_trace_space_and_paints(
+    regions: &[ColorRegion],
+    trace_width: u32,
+    trace_height: u32,
+    output_width: u32,
+    output_height: u32,
+    coordinate_scale: f64,
+    config: &TracingConfig,
+    gradient_paints: Option<&SvgGradientPaintMap>,
+) -> SvgBuildResult {
     let mut svg = String::new();
     let mut metrics = SvgEmissionMetrics::default();
     let ordered_regions = order_regions_for_emission(regions, config);
+    let ordered_region_outputs = build_ordered_region_outputs(
+        &ordered_regions,
+        trace_width,
+        trace_height,
+        output_width,
+        output_height,
+        coordinate_scale,
+        config,
+    );
 
-    let bg = config.background_color.unwrap_or((255, 255, 255));
+    let bg = config.resolved_background_color();
     let bg_fill = format!("#{:02x}{:02x}{:02x}", bg.0, bg.1, bg.2);
 
     // SVG header
@@ -152,24 +214,15 @@ pub(crate) fn generate_svg_with_trace_space(
 "#
     ));
 
-    // Each color region as a path group
-    for ordered_region in ordered_regions {
-        let region = ordered_region.region;
+    append_gradient_definitions(&mut svg, gradient_paints);
 
-        let hex = region.color.to_hex();
+    // Each color region as a path group. Region path construction is parallel,
+    // but final SVG serialization remains sequential to preserve deterministic output.
+    for ordered_region_output in ordered_region_outputs {
+        metrics.contours_suppressed_background +=
+            ordered_region_output.result.contours_suppressed_background;
 
-        let region_result = build_region_paths(
-            region,
-            trace_width,
-            trace_height,
-            output_width,
-            output_height,
-            coordinate_scale,
-            config,
-        );
-        metrics.contours_suppressed_background += region_result.contours_suppressed_background;
-
-        for path_result in region_result.paths {
+        for path_result in ordered_region_output.result.paths {
             metrics.contours_simplified_away += path_result.contours_simplified_away;
             metrics.contours_filtered_min_area += path_result.contours_filtered_min_area;
 
@@ -178,13 +231,18 @@ pub(crate) fn generate_svg_with_trace_space(
             }
 
             let seam_stroke = seam_stroke_attributes(
-                region.color,
+                ordered_region_output.color,
                 path_result.seam_stroke_width_centi_px,
                 config,
             );
+            let fill = region_fill_attributes(
+                ordered_region_output.color,
+                &ordered_region_output.hex,
+                gradient_paints,
+            );
 
             svg.push_str(&format!(
-                r#"  <path fill="{hex}" fill-rule="evenodd"{seam_stroke} d="{path_data}"/>
+                r#"  <path fill="{fill}" fill-rule="evenodd"{seam_stroke} d="{path_data}"/>
 "#,
                 path_data = path_result.data
             ));
@@ -198,6 +256,33 @@ pub(crate) fn generate_svg_with_trace_space(
 
     svg.push_str("</svg>\n");
     SvgBuildResult { svg, metrics }
+}
+
+fn build_ordered_region_outputs(
+    ordered_regions: &[OrderedRegion<'_>],
+    trace_width: u32,
+    trace_height: u32,
+    output_width: u32,
+    output_height: u32,
+    coordinate_scale: f64,
+    config: &TracingConfig,
+) -> Vec<OrderedRegionOutput> {
+    ordered_regions
+        .par_iter()
+        .map(|ordered_region| OrderedRegionOutput {
+            color: ordered_region.region.color,
+            hex: ordered_region.region.color.to_hex(),
+            result: build_region_paths(
+                ordered_region.region,
+                trace_width,
+                trace_height,
+                output_width,
+                output_height,
+                coordinate_scale,
+                config,
+            ),
+        })
+        .collect()
 }
 
 fn order_regions_for_emission<'a>(
@@ -246,25 +331,128 @@ fn build_region_paths(
     config: &TracingConfig,
 ) -> RegionBuildResult {
     let plan = region_path_groups(region, trace_width, trace_height, config);
+    let paths = plan
+        .contour_groups
+        .into_iter()
+        .map(|contour_indices| {
+            build_path_data_from_indices(
+                region.color,
+                &region.contours,
+                &contour_indices,
+                output_width,
+                output_height,
+                coordinate_scale,
+                config,
+            )
+        })
+        .collect();
 
     RegionBuildResult {
-        paths: plan
-            .contour_groups
-            .into_iter()
-            .map(|contour_indices| {
-                build_path_data_from_indices(
-                    region.color,
-                    &region.contours,
-                    &contour_indices,
-                    output_width,
-                    output_height,
-                    coordinate_scale,
-                    config,
-                )
-            })
-            .collect(),
+        paths: merge_region_paths(paths),
         contours_suppressed_background: plan.contours_suppressed_background,
     }
+}
+
+fn merge_region_paths(paths: Vec<PathBuildResult>) -> Vec<PathBuildResult> {
+    let mut merged = Vec::new();
+
+    for mut path in paths {
+        if let Some(existing) = merged.iter_mut().find(|existing: &&mut PathBuildResult| {
+            existing.seam_stroke_width_centi_px == path.seam_stroke_width_centi_px
+        }) {
+            if !existing.data.is_empty() && !path.data.is_empty() {
+                existing.data.push(' ');
+            }
+
+            existing.data.push_str(&path.data);
+            existing.contours_emitted += path.contours_emitted;
+            existing.holes_emitted += path.holes_emitted;
+            existing.points_emitted += path.points_emitted;
+            existing.contours_simplified_away += path.contours_simplified_away;
+            existing.contours_filtered_min_area += path.contours_filtered_min_area;
+        } else {
+            path.data = path.data.trim().to_string();
+            merged.push(path);
+        }
+    }
+
+    merged
+}
+
+fn append_gradient_definitions(svg: &mut String, gradient_paints: Option<&SvgGradientPaintMap>) {
+    let Some(gradient_paints) = gradient_paints else {
+        return;
+    };
+    if gradient_paints.is_empty() {
+        return;
+    }
+
+    let mut paints: Vec<_> = gradient_paints.values().collect();
+    paints.sort_by(|left, right| left.id.cmp(&right.id));
+
+    svg.push_str("  <defs>\n");
+
+    for paint in paints {
+        match &paint.kind {
+            SvgGradientKind::Linear {
+                x1,
+                y1,
+                x2,
+                y2,
+                start,
+                end,
+            } => {
+                svg.push_str(&format!(
+                    r#"    <linearGradient id="{}" gradientUnits="userSpaceOnUse" x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}">
+      <stop offset="0%" stop-color="{}"/>
+      <stop offset="100%" stop-color="{}"/>
+    </linearGradient>
+"#,
+                    paint.id,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    start.to_hex(),
+                    end.to_hex(),
+                ));
+            }
+            SvgGradientKind::Radial {
+                cx,
+                cy,
+                radius,
+                inner,
+                outer,
+            } => {
+                svg.push_str(&format!(
+                    r#"    <radialGradient id="{}" gradientUnits="userSpaceOnUse" cx="{:.2}" cy="{:.2}" r="{:.2}">
+      <stop offset="0%" stop-color="{}"/>
+      <stop offset="100%" stop-color="{}"/>
+    </radialGradient>
+"#,
+                    paint.id,
+                    cx,
+                    cy,
+                    radius,
+                    inner.to_hex(),
+                    outer.to_hex(),
+                ));
+            }
+        }
+    }
+
+    svg.push_str("  </defs>\n");
+}
+
+fn region_fill_attributes(
+    color: PaletteColor,
+    fallback_hex: &str,
+    gradient_paints: Option<&SvgGradientPaintMap>,
+) -> String {
+    gradient_paints
+        .and_then(|gradient_paints| gradient_paints.get(&color))
+        .map(|paint| format!("url(#{})", paint.id))
+        .unwrap_or_else(|| fallback_hex.to_string())
 }
 
 fn region_path_groups(
@@ -379,7 +567,7 @@ fn suppressed_background_contours(
 }
 
 fn is_background_color(color: PaletteColor, config: &TracingConfig) -> bool {
-    let bg = config.background_color.unwrap_or((255, 255, 255));
+    let bg = config.resolved_background_color();
     color
         == (PaletteColor {
             r: bg.0,
@@ -1037,6 +1225,94 @@ mod tests {
     }
 
     #[test]
+    fn generate_svg_merges_same_color_disconnected_paths() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.0,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![ColorRegion {
+            color: PaletteColor { r: 0, g: 0, b: 0 },
+            contours: vec![
+                vec![
+                    Point::new(0, 0),
+                    Point::new(4, 0),
+                    Point::new(4, 4),
+                    Point::new(0, 4),
+                ],
+                vec![
+                    Point::new(6, 0),
+                    Point::new(10, 0),
+                    Point::new(10, 4),
+                    Point::new(6, 4),
+                ],
+            ],
+        }];
+
+        let result = generate_svg_with_metrics(&regions, 10, 4, &config);
+
+        assert_eq!(result.metrics.regions_emitted, 1);
+        assert_eq!(result.metrics.contours_emitted, 2);
+        assert_eq!(result.svg.matches("<path").count(), 1);
+        assert!(result.svg.matches("M ").count() >= 2);
+    }
+
+    #[test]
+    fn generate_svg_with_gradient_paints_emits_defs_and_url_fill() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.0,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let color = PaletteColor {
+            r: 128,
+            g: 32,
+            b: 128,
+        };
+        let mut gradient_paints = SvgGradientPaintMap::new();
+        gradient_paints.insert(
+            color,
+            crate::pipeline::gradient::SvgGradientPaint {
+                id: "grad-802080".to_string(),
+                kind: SvgGradientKind::Linear {
+                    x1: 0.0,
+                    y1: 2.0,
+                    x2: 8.0,
+                    y2: 2.0,
+                    start: PaletteColor {
+                        r: 32,
+                        g: 32,
+                        b: 192,
+                    },
+                    end: PaletteColor {
+                        r: 224,
+                        g: 32,
+                        b: 64,
+                    },
+                },
+            },
+        );
+        let regions = vec![ColorRegion {
+            color,
+            contours: vec![vec![
+                Point::new(0, 0),
+                Point::new(8, 0),
+                Point::new(8, 4),
+                Point::new(0, 4),
+            ]],
+        }];
+
+        let result =
+            generate_svg_with_metrics_and_paints(&regions, 8, 4, &config, Some(&gradient_paints));
+
+        assert!(result.svg.contains("<defs>"));
+        assert!(result.svg.contains("<linearGradient"));
+        assert!(result.svg.contains(r##"fill="url(#grad-802080)""##));
+    }
+
+    #[test]
     fn generate_svg_with_metrics_counts_bezier_control_points() {
         let config = crate::config::TracingConfig {
             smoothing_strength: 0.6,
@@ -1158,6 +1434,59 @@ mod tests {
         let outline_index = svg.rfind(r##"fill="#060603""##).unwrap();
 
         assert!(fill_index < outline_index);
+    }
+
+    #[test]
+    fn build_ordered_region_outputs_preserves_emission_order() {
+        let config = crate::config::TracingConfig {
+            smoothing_strength: 0.0,
+            simplification_tolerance: 0.0,
+            min_region_area: 0.0,
+            ..crate::config::TracingConfig::default()
+        };
+        let regions = vec![
+            ColorRegion {
+                color: PaletteColor { r: 255, g: 0, b: 0 },
+                contours: vec![vec![
+                    Point::new(2, 2),
+                    Point::new(4, 2),
+                    Point::new(4, 4),
+                    Point::new(2, 4),
+                ]],
+            },
+            ColorRegion {
+                color: PaletteColor { r: 0, g: 0, b: 255 },
+                contours: vec![vec![
+                    Point::new(0, 0),
+                    Point::new(8, 0),
+                    Point::new(8, 8),
+                    Point::new(0, 8),
+                ]],
+            },
+            ColorRegion {
+                color: PaletteColor { r: 6, g: 6, b: 3 },
+                contours: vec![vec![
+                    Point::new(1, 1),
+                    Point::new(7, 1),
+                    Point::new(7, 7),
+                    Point::new(1, 7),
+                ]],
+            },
+        ];
+
+        let ordered_regions = order_regions_for_emission(&regions, &config);
+        let ordered_colors: Vec<PaletteColor> = ordered_regions
+            .iter()
+            .map(|ordered_region| ordered_region.region.color)
+            .collect();
+
+        let outputs = build_ordered_region_outputs(&ordered_regions, 8, 8, 8, 8, 1.0, &config);
+        let output_colors: Vec<PaletteColor> = outputs
+            .iter()
+            .map(|ordered_region_output| ordered_region_output.color)
+            .collect();
+
+        assert_eq!(output_colors, ordered_colors);
     }
 
     #[test]

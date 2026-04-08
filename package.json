@@ -1,0 +1,17 @@
+{
+  "name": "vectizeit",
+  "version": "0.1.0",
+  "description": "Utilities for vectorization workflows.",
+  "license": "MIT",
+  "scripts": {},
+  "keywords": [
+    "vector",
+    "typescript",
+    "utilities"
+  ],
+  "author": "",
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {}
+}

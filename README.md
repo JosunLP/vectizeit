@@ -31,11 +31,14 @@ vectizeit/
 │   │   │       ├── curves.rs
 │   │   │       └── svg.rs
 │   │   └── tests/
-│   │       └── integration_tests.rs  # API & golden tests (37 tests)
+│   │       └── integration_tests.rs  # API & golden tests (43 tests)
 │   └── vectize-cli/            # CLI binary crate (`trace`)
 │       ├── src/main.rs
 │       └── tests/
-│           └── cli_smoke_tests.rs    # CLI smoke tests (17 tests)
+│           └── cli_smoke_tests.rs    # CLI smoke tests (19 tests)
+│   └── vectize-wasm/           # `wasm-bindgen` bindings for JS/TS consumers
+│       ├── Cargo.toml
+│       └── src/lib.rs
 ```
 
 ---
@@ -54,11 +57,14 @@ cargo build --release
 # Run all tests
 cargo test
 
+# Build the wasm bindings (requires the wasm32 target)
+cargo build -p vectize-wasm --target wasm32-unknown-unknown
+
 # Check formatting
 cargo fmt --check
 
 # Run linter
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Apply auto-formatting
 cargo fmt
@@ -66,13 +72,14 @@ cargo fmt
 
 ### Test Coverage
 
-The project includes **129 automated tests** across four categories:
+The project includes **178 automated tests** across five categories:
 
 | Category          | Location                                      | Tests |
 | ----------------- | --------------------------------------------- | ----- |
-| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 74    |
-| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 37    |
-| CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 17    |
+| Unit tests        | Embedded in each module (`#[cfg(test)]`)      | 114   |
+| Integration tests | `crates/vectize/tests/integration_tests.rs`   | 43    |
+| CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 19    |
+| WASM unit tests   | `crates/vectize-wasm/src/lib.rs`              | 1     |
 | Doc tests         | `crates/vectize/src/lib.rs`                   | 1     |
 
 Test types include:
@@ -113,8 +120,17 @@ trace convert noisy.png --denoise
 # Set a custom alpha threshold
 trace convert transparent.png --alpha-threshold 64
 
+# Composite transparency against a custom background color
+trace convert transparent.png --background-color "#102030"
+
 # Disable preprocessing for already-clean source art
 trace convert logo.png --no-preprocess
+
+# Approximate smooth fills with SVG gradients
+trace convert sky.png --gradients
+
+# Reduce peak segmentation memory on large inputs with tile-aware assignment
+trace convert poster.png --preset high --tile-size 512
 ```
 
 ### Batch conversion
@@ -134,6 +150,9 @@ trace batch ./images/ ./vectors/ --format svg -v
 
 # Apply the same tracing overrides to every file in the batch
 trace batch ./images/ ./vectors/ --format svg --colors 24 --tolerance 0.6 --denoise
+
+# Batch-convert large files with gradients and tiled segmentation
+trace batch ./images/ ./vectors/ --format svg --gradients --tile-size 512
 ```
 
 ### Help
@@ -176,6 +195,9 @@ let config = TracingConfig {
     min_region_area: 3.0,
     smoothing_strength: 0.6,
     enable_denoising: true,
+    background_color: Some((0x10, 0x20, 0x30)),
+    enable_svg_gradients: true,
+    tile_size: Some(512),
     ..TracingConfig::default()
 };
 
@@ -224,6 +246,52 @@ let bytes: Vec<u8> = download_image();
 let svg = trace_bytes(&bytes)?;
 ```
 
+### Observe pipeline progress for UI feedback
+
+```rust
+use vectize::{QualityPreset, TraceStage, Tracer};
+
+let tracer = Tracer::with_preset(QualityPreset::High);
+let result = tracer.trace_file_result_with_progress("input.png", |update| {
+    eprintln!(
+        "stage={:?} progress={}/{}",
+        update.stage(),
+        update.completed_stages(),
+        update.total_stages()
+    );
+})?;
+
+assert_eq!(result.width() > 0, true);
+```
+
+### JavaScript / TypeScript via `wasm-bindgen`
+
+The workspace now includes `crates/vectize-wasm`, which exposes:
+
+- `traceBytesSvg(bytes)` → SVG string
+- `traceBytes(bytes)` → structured tracing result
+- `traceBytesWithConfig(bytes, config)` → structured tracing result with Rust-equivalent options
+- `traceBytesWithProgress(bytes, config, callback)` → structured tracing result plus stage callbacks
+
+Example usage after packaging the generated wasm bundle:
+
+```ts
+import init, { traceBytesWithConfig, traceBytesWithProgress } from "./pkg/vectize_wasm";
+
+await init();
+
+const result = traceBytesWithConfig(bytes, {
+  preset: "high",
+  backgroundColor: "#102030",
+  enableSvgGradients: true,
+  tileSize: 512,
+});
+
+traceBytesWithProgress(bytes, { preset: "balanced" }, (update) => {
+  console.log(update.stage, update.completedStages, update.totalStages);
+});
+```
+
 ### Validate configuration before use
 
 ```rust
@@ -241,16 +309,44 @@ if let Err(msg) = config.validate() {
 
 The library processes images in eight sequential stages:
 
-| Stage           | Module                              | Description                                                                                                                                                                                                                                                                                                                                            |
-| --------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1. Load         | `pipeline::loader`                  | Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the file extension or byte magic header.                                                                                                                                                                                                                                    |
-| 2. Preprocess   | `pipeline::preprocess`              | Convert to RGBA8, optionally apply a 3×3 edge-aware Gaussian blur for denoising (controlled by `enable_preprocessing` and `enable_denoising`), optionally resample to a denser tracing grid for higher-fidelity presets, and composite transparent pixels against a white background.                                                             |
-| 3. Segment      | `pipeline::segment`                 | Reduce the palette to *N* colors using **median-cut quantization** seeded with deterministic palette-refinement passes. The segmenter collapses anti-aliased bridge shades, compacts unused palette entries, and adaptively caps flat-art traces to a smaller internal palette when a long tail of tiny colors would otherwise over-segment simple graphics. |
-| 4. Contour      | `pipeline::contour`                 | Trace deterministic grid-edge contour loops for each color region, preserving interior holes and stable winding. Incomplete or otherwise invalid loops are discarded before downstream processing and reported through stage metrics for diagnostics.                                                                                                  |
-| 5. Despeckle    | `pipeline::mod`                     | Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing noise artifacts and speckles.                                                                                                                                                                                                                                      |
-| 6. Simplify     | `pipeline::simplify`                | Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The `simplification_tolerance` parameter controls aggressiveness.                                                                                                                                                                                                             |
-| 7. Smooth       | `pipeline::smooth`                  | Apply **adaptive Laplacian vertex relaxation** to shift grid-aligned contour vertices off the integer grid while damping the effect near sharp corners, reducing staircase artifacts without rounding away important structure before curve fitting. The relaxation weight is derived from `smoothing_strength` and modulated by `corner_sensitivity`. |
-| 8. Curves + SVG | `pipeline::curves`, `pipeline::svg` | Fit closed contours to **cubic Bezier splines** using wrap-around corner detection and edge-aligned handles, then emit valid SVG markup with deterministic area-based path ordering so smaller details stay above larger fills.                                                                                                                        |
+1. **Load** — `pipeline::loader`
+  Decode PNG, JPEG, or WebP using the `image` crate. Format is inferred from the
+  file extension or byte magic header.
+2. **Preprocess** — `pipeline::preprocess`
+  Convert to RGBA8, optionally apply a 3×3 edge-aware Gaussian blur for denoising
+  (controlled by `enable_preprocessing` and `enable_denoising`), optionally resample
+  to a denser tracing grid for higher-fidelity presets, and composite transparent
+  pixels against a white background.
+3. **Segment** — `pipeline::segment`
+  Reduce the palette to *N* colors using deterministic **perceptual Oklab
+  quantization** with farthest-point seeding and refinement passes. The segmenter
+  collapses anti-aliased bridge shades, compacts unused palette entries, adaptively
+  caps flat-art traces to a smaller internal palette, and can assign palette labels
+  tile-by-tile on large images to reduce peak segmentation memory.
+4. **Contour** — `pipeline::contour`
+  Trace deterministic grid-edge contour loops for each color region, preserving
+  interior holes and stable winding. Incomplete or otherwise invalid loops are
+  discarded before downstream processing and reported through stage metrics for
+  diagnostics.
+5. **Despeckle** — `pipeline::mod`
+  Remove tiny contours whose perimeter falls below `despeckle_threshold`, suppressing
+  noise artifacts and speckles.
+6. **Simplify** — `pipeline::simplify`
+  Reduce polygon point count with the **Ramer-Douglas-Peucker** algorithm. The
+  `simplification_tolerance` parameter controls aggressiveness.
+7. **Smooth** — `pipeline::smooth`
+  Apply **adaptive Laplacian vertex relaxation** to shift grid-aligned contour
+  vertices off the integer grid while damping the effect near sharp corners,
+  reducing staircase artifacts without rounding away important structure before curve
+  fitting. The relaxation weight is derived from `smoothing_strength`, modulated by
+  `corner_sensitivity`, and followed by a deterministic area-compensation pass for
+  larger contours.
+8. **Curves + SVG** — `pipeline::curves`, `pipeline::svg`
+  Fit closed contours to **cubic Bezier splines** using wrap-around corner detection
+  and edge-aligned handles, build per-region SVG paths concurrently with `rayon`,
+  merge same-colored fragments into fewer `<path>` elements, optionally approximate
+  smooth fills with linear/radial SVG gradients, then emit valid SVG markup with
+  deterministic area-based ordering so smaller details stay above larger fills.
 
 Border-connected pure-white background contours are omitted from final `<path>` elements
 because the document already includes a white background rectangle. Interior white islands
@@ -275,17 +371,24 @@ smaller internal palette when a large color budget would only preserve anti-alia
 
 ## Configuration Reference
 
-| Field                      | Type   | Default | Description                                                            |
-| -------------------------- | ------ | ------- | ---------------------------------------------------------------------- |
-| `color_count`              | `u16`  | `16`    | Number of palette colors (2–256)                                       |
-| `simplification_tolerance` | `f64`  | `1.0`   | RDP tolerance in pixels                                                |
-| `min_region_area`          | `f64`  | `4.0`   | Minimum polygon area to include                                        |
-| `smoothing_strength`       | `f64`  | `0.5`   | Contour smoothing + Bezier curves (0 = straight lines)                 |
-| `corner_sensitivity`       | `f64`  | `0.6`   | Corner preservation strength for adaptive smoothing and Bezier fitting |
-| `alpha_threshold`          | `u8`   | `128`   | Pixels below this alpha are transparent                                |
-| `despeckle_threshold`      | `f64`  | `2.0`   | Minimum contour perimeter                                              |
-| `enable_denoising`         | `bool` | `false` | Apply edge-aware Gaussian blur before tracing                          |
-| `enable_preprocessing`     | `bool` | `true`  | Enable normalization stage                                             |
+- `color_count` (`u16`, default `16`) — Number of palette colors (2–256)
+- `simplification_tolerance` (`f64`, default `1.0`) — RDP tolerance in pixels
+- `min_region_area` (`f64`, default `4.0`) — Minimum polygon area to include
+- `smoothing_strength` (`f64`, default `0.5`) — Contour smoothing + Bezier curves
+  (`0` = straight lines)
+- `corner_sensitivity` (`f64`, default `0.6`) — Corner preservation strength for
+  adaptive smoothing and Bezier fitting
+- `alpha_threshold` (`u8`, default `128`) — Pixels below this alpha are transparent
+- `despeckle_threshold` (`f64`, default `2.0`) — Minimum contour perimeter
+- `enable_denoising` (`bool`, default `false`) — Apply edge-aware Gaussian blur
+  before tracing
+- `enable_preprocessing` (`bool`, default `true`) — Enable normalization stage
+- `background_color` (`Option<(u8, u8, u8)>`, default `None`) — Composite transparency
+  and emit the SVG background using a custom RGB color; `None` falls back to white
+- `enable_svg_gradients` (`bool`, default `false`) — Approximate smooth region fills
+  with linear/radial SVG gradients
+- `tile_size` (`Option<u32>`, default `None`) — Assign palette labels in tiles to
+  reduce peak segmentation memory
 
 ### Quality Presets
 
@@ -305,14 +408,27 @@ preset.
 
 ## Dependency Choices
 
-| Crate                                                          | Reason                                                                                                 |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| [`image`](https://crates.io/crates/image)                      | De facto standard Rust image I/O; handles PNG, JPEG, and WebP decoding with a unified API.             |
-| [`thiserror`](https://crates.io/crates/thiserror)              | Generates `Display` and `Error` impls for the error enum with minimal boilerplate.                     |
-| [`log`](https://crates.io/crates/log)                          | Logging facade — keeps the library decoupled from any specific logger backend.                         |
-| [`rayon`](https://crates.io/crates/rayon)                      | Work-stealing parallel iterator library; declared for future parallelization of per-region processing. |
-| [`clap`](https://crates.io/crates/clap) (CLI only)             | Industry-standard argument parsing with derive macros for clean, self-documenting CLI definitions.     |
-| [`env_logger`](https://crates.io/crates/env_logger) (CLI only) | Simple `RUST_LOG`-driven logger backend for the CLI binary.                                            |
+- [`image`](https://crates.io/crates/image) — De facto standard Rust image I/O;
+  handles PNG, JPEG, and WebP decoding with a unified API.
+- [`thiserror`](https://crates.io/crates/thiserror) — Generates `Display` and
+  `Error` impls for the error enum with minimal boilerplate.
+- [`log`](https://crates.io/crates/log) — Logging facade that keeps the library
+  decoupled from any specific logger backend.
+- [`rayon`](https://crates.io/crates/rayon) — Work-stealing parallel iterator
+  library used for CLI batch conversion and deterministic per-region SVG path
+  construction.
+- [`clap`](https://crates.io/crates/clap) *(CLI only)* — Industry-standard
+  argument parsing with derive macros for clean, self-documenting CLI definitions.
+- [`env_logger`](https://crates.io/crates/env_logger) *(CLI only)* — Simple
+  `RUST_LOG`-driven logger backend for the CLI binary.
+- [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen) *(WASM crate only)* —
+  Exposes the tracer to JavaScript/TypeScript without changing the native Rust API
+  surface.
+- [`js-sys`](https://crates.io/crates/js-sys) *(WASM crate only)* — Provides JS
+  callback and typed-array interop for progress reporting and byte input.
+- [`serde-wasm-bindgen`](https://crates.io/crates/serde-wasm-bindgen) *(WASM crate
+  only)* — Converts rich tracing results and config objects between Rust and JS
+  values.
 
 ---
 
@@ -321,31 +437,11 @@ preset.
 - **Pixel-grid coordinates.** Contours are traced on integer pixel coordinates. Adaptive Laplacian
   vertex smoothing shifts points off-grid before Bezier fitting, but very small images may
   still produce slightly blocky results even at high quality settings.
-- **No path merging.** Adjacent regions of the same color from different quantization buckets
-  are emitted as separate paths rather than being merged.
-- **Median-cut quantization** is improved with deterministic refinement, but it can still
-  split perceptually similar colors and merge distinct ones compared to stronger
-  perceptual quantizers (e.g. neuquant). The current approach stays fast and deterministic,
-  which makes it suitable for a library.
-- **No streaming input.** The entire image is loaded into memory before processing begins.
+- **Tile mode reduces segmentation memory, not decode memory.** The `image` crate still decodes
+  the full source eagerly before the tile-aware palette-assignment pass begins.
+- **Gradient fitting is intentionally conservative.** Busy textures and sharp color steps stay as
+  solid fills; gradients are only emitted when a deterministic linear/radial fit clearly helps.
 - **WebP encoding is not supported** — only decoding. The output is always SVG.
-
----
-
-## Future Improvements
-
-- [ ] **Parallel region processing** — use `rayon` to process color regions concurrently.
-- [ ] **Perceptual color quantization** — replace median-cut with a perceptually-uniform
-  palette (e.g. Wu quantization or OCIAF).
-- [ ] **Area-preserving smoothing** — reduce residual contour shrinkage on large regions while
-  keeping the current corner-aware adaptive pass stable and deterministic.
-- [ ] **Path merging** — merge adjacent same-colored paths into a single path element.
-- [ ] **WASM target** — expose the library to JavaScript/TypeScript via `wasm-bindgen`.
-- [ ] **Progress callbacks** — let callers observe pipeline stage completion for UI feedback.
-- [ ] **SVG gradient support** — approximate smooth color gradients with radial/linear SVG
-  gradient elements.
-- [ ] **Streaming / tiled processing** — process large images in tiles to reduce peak memory
-  usage.
 
 ---
 

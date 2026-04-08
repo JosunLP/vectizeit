@@ -101,6 +101,14 @@ struct ConvertArgs {
     #[arg(long)]
     background_color: Option<String>,
 
+    /// Approximate smooth region color variation with SVG gradients
+    #[arg(long)]
+    gradients: bool,
+
+    /// Process palette assignment in tiles to reduce peak segmentation memory
+    #[arg(long)]
+    tile_size: Option<u32>,
+
     /// Overwrite output file if it already exists
     #[arg(long)]
     overwrite: bool,
@@ -162,6 +170,14 @@ struct BatchArgs {
     /// Background color as hex (e.g. "#ff0000" or "00ff00"); default is white
     #[arg(long)]
     background_color: Option<String>,
+
+    /// Approximate smooth region color variation with SVG gradients
+    #[arg(long)]
+    gradients: bool,
+
+    /// Process palette assignment in tiles to reduce peak segmentation memory
+    #[arg(long)]
+    tile_size: Option<u32>,
 
     /// Enable Gaussian denoising before tracing
     #[arg(long)]
@@ -248,26 +264,18 @@ fn build_config(preset_str: &str, overrides: ConfigOverrides) -> Result<TracingC
         config.enable_preprocessing = false;
     }
     if let Some(ref hex) = overrides.background_color {
-        config.background_color = Some(parse_hex_color(hex)?);
+        config.background_color = Some(TracingConfig::parse_hex_color(hex)?);
+    }
+    if overrides.gradients {
+        config.enable_svg_gradients = true;
+    }
+    if let Some(tile_size) = overrides.tile_size {
+        config.tile_size = Some(tile_size);
     }
 
     config.validate()?;
     Ok(config)
 }
-
-fn parse_hex_color(s: &str) -> Result<(u8, u8, u8), String> {
-    let hex = s.strip_prefix('#').unwrap_or(s);
-    if hex.len() != 6 {
-        return Err(format!(
-            "Invalid hex color '{s}': expected 6 hex digits (e.g. \"#ff0000\")"
-        ));
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| format!("Invalid hex color '{s}'"))?;
-    let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| format!("Invalid hex color '{s}'"))?;
-    let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| format!("Invalid hex color '{s}'"))?;
-    Ok((r, g, b))
-}
-
 struct ConfigOverrides {
     colors: Option<u16>,
     tolerance: Option<f64>,
@@ -277,6 +285,8 @@ struct ConfigOverrides {
     alpha_threshold: Option<u8>,
     despeckle_threshold: Option<f64>,
     background_color: Option<String>,
+    gradients: bool,
+    tile_size: Option<u32>,
     denoise: bool,
     no_preprocess: bool,
 }
@@ -293,6 +303,8 @@ fn run_convert(args: &ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
             alpha_threshold: args.alpha_threshold,
             despeckle_threshold: args.despeckle_threshold,
             background_color: args.background_color.clone(),
+            gradients: args.gradients,
+            tile_size: args.tile_size,
             denoise: args.denoise,
             no_preprocess: args.no_preprocess,
         },
@@ -344,6 +356,8 @@ fn run_batch(args: &BatchArgs) -> Result<(), Box<dyn std::error::Error>> {
             alpha_threshold: args.alpha_threshold,
             despeckle_threshold: args.despeckle_threshold,
             background_color: args.background_color.clone(),
+            gradients: args.gradients,
+            tile_size: args.tile_size,
             denoise: args.denoise,
             no_preprocess: args.no_preprocess,
         },

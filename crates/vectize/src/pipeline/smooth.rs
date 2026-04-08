@@ -3,9 +3,15 @@
 //! Applies weighted averaging to shift grid-aligned contour vertices off the
 //! integer grid, reducing staircase artifacts before Bezier curve fitting.
 //! The adaptive variant dampens smoothing near sharp corners so the pipeline
-//! preserves more structure while still softening pixel stair-steps.
+//! preserves more structure while still softening pixel stair-steps. Larger
+//! contours also receive a deterministic area-compensation pass after each
+//! smoothing iteration so broad fills keep their apparent footprint better.
 
 use crate::pipeline::curves::corner_cosine;
+
+const AREA_PRESERVATION_MIN_AREA: f64 = 64.0;
+const AREA_PRESERVATION_FULL_AREA: f64 = 256.0;
+const AREA_PRESERVATION_SCALE_EPSILON: f64 = 1e-3;
 
 /// Apply one pass of Laplacian smoothing to a closed polygon.
 ///
@@ -30,28 +36,7 @@ pub(crate) fn smooth_closed_contour_multi(
     weight: f64,
     iterations: u32,
 ) -> Vec<(f64, f64)> {
-    let n = points.len();
-    if n < 3 || weight <= 0.0 || iterations == 0 {
-        return points.to_vec();
-    }
-
-    let w = weight.clamp(0.0, 1.0);
-    let mut current = points.to_vec();
-
-    for _ in 0..iterations {
-        current = (0..n)
-            .map(|i| {
-                let prev = current[(i + n - 1) % n];
-                let curr = current[i];
-                let next = current[(i + 1) % n];
-                let avg_x = (prev.0 + next.0) * 0.5;
-                let avg_y = (prev.1 + next.1) * 0.5;
-                (curr.0 + w * (avg_x - curr.0), curr.1 + w * (avg_y - curr.1))
-            })
-            .collect();
-    }
-
-    current
+    smooth_closed_contour_with_corner_sensitivity(points, weight, iterations, 0.0)
 }
 
 /// Apply multiple adaptive Laplacian smoothing passes to a closed polygon.
@@ -61,6 +46,15 @@ pub(crate) fn smooth_closed_contour_multi(
 /// increases. A sensitivity of `0.0` matches uniform smoothing, while `1.0`
 /// strongly protects sharp turns from being rounded away.
 pub(crate) fn smooth_closed_contour_adaptive_multi(
+    points: &[(f64, f64)],
+    weight: f64,
+    iterations: u32,
+    corner_sensitivity: f64,
+) -> Vec<(f64, f64)> {
+    smooth_closed_contour_with_corner_sensitivity(points, weight, iterations, corner_sensitivity)
+}
+
+fn smooth_closed_contour_with_corner_sensitivity(
     points: &[(f64, f64)],
     weight: f64,
     iterations: u32,
@@ -76,24 +70,86 @@ pub(crate) fn smooth_closed_contour_adaptive_multi(
     let mut current = points.to_vec();
 
     for _ in 0..iterations {
-        current = (0..n)
-            .map(|i| {
-                let prev = current[(i + n - 1) % n];
-                let curr = current[i];
-                let next = current[(i + 1) % n];
-                let avg_x = (prev.0 + next.0) * 0.5;
-                let avg_y = (prev.1 + next.1) * 0.5;
-                let local_weight = w * adaptive_corner_weight(prev, curr, next, sensitivity);
-
-                (
-                    curr.0 + local_weight * (avg_x - curr.0),
-                    curr.1 + local_weight * (avg_y - curr.1),
-                )
-            })
-            .collect();
+        let smoothed = laplacian_smooth_closed_contour_step(&current, n, w, sensitivity);
+        current = preserve_large_contour_area(&current, &smoothed);
     }
 
     current
+}
+
+fn laplacian_smooth_closed_contour_step(
+    points: &[(f64, f64)],
+    point_count: usize,
+    weight: f64,
+    corner_sensitivity: f64,
+) -> Vec<(f64, f64)> {
+    (0..point_count)
+        .map(|i| {
+            let prev = points[(i + point_count - 1) % point_count];
+            let curr = points[i];
+            let next = points[(i + 1) % point_count];
+            let avg_x = (prev.0 + next.0) * 0.5;
+            let avg_y = (prev.1 + next.1) * 0.5;
+            let local_weight =
+                weight * adaptive_corner_weight(prev, curr, next, corner_sensitivity);
+
+            (
+                curr.0 + local_weight * (avg_x - curr.0),
+                curr.1 + local_weight * (avg_y - curr.1),
+            )
+        })
+        .collect()
+}
+
+fn preserve_large_contour_area(
+    reference: &[(f64, f64)],
+    smoothed: &[(f64, f64)],
+) -> Vec<(f64, f64)> {
+    if reference.len() < 3 || reference.len() != smoothed.len() {
+        return smoothed.to_vec();
+    }
+
+    let reference_area = polygon_area_f64(reference);
+    if reference_area < AREA_PRESERVATION_MIN_AREA {
+        return smoothed.to_vec();
+    }
+
+    let smoothed_area = polygon_area_f64(smoothed);
+    if smoothed_area <= f64::EPSILON {
+        return smoothed.to_vec();
+    }
+
+    let raw_scale = (reference_area / smoothed_area).sqrt();
+    if !raw_scale.is_finite() {
+        return smoothed.to_vec();
+    }
+
+    let blend = remap_clamped(
+        reference_area,
+        AREA_PRESERVATION_MIN_AREA,
+        AREA_PRESERVATION_FULL_AREA,
+        0.0,
+        1.0,
+    );
+    if blend <= 0.0 {
+        return smoothed.to_vec();
+    }
+
+    let scale = 1.0 + ((raw_scale - 1.0) * blend);
+    if (scale - 1.0).abs() <= AREA_PRESERVATION_SCALE_EPSILON {
+        return smoothed.to_vec();
+    }
+
+    let centroid = polygon_centroid(smoothed).unwrap_or_else(|| average_point(smoothed));
+    smoothed
+        .iter()
+        .map(|&(x, y)| {
+            (
+                centroid.0 + ((x - centroid.0) * scale),
+                centroid.1 + ((y - centroid.1) * scale),
+            )
+        })
+        .collect()
 }
 
 fn adaptive_corner_weight(
@@ -114,6 +170,75 @@ fn adaptive_corner_weight(
     let protected_weight = straightness.powf(1.0 + (sensitivity * 4.0));
 
     1.0 - (sensitivity * (1.0 - protected_weight))
+}
+
+fn polygon_area_f64(points: &[(f64, f64)]) -> f64 {
+    let point_count = points.len();
+    if point_count < 3 {
+        return 0.0;
+    }
+
+    let mut area = 0.0;
+    for index in 0..point_count {
+        let next_index = (index + 1) % point_count;
+        area += points[index].0 * points[next_index].1;
+        area -= points[next_index].0 * points[index].1;
+    }
+
+    (area * 0.5).abs()
+}
+
+fn polygon_signed_area_f64(points: &[(f64, f64)]) -> f64 {
+    let point_count = points.len();
+    if point_count < 3 {
+        return 0.0;
+    }
+
+    let mut area = 0.0;
+    for index in 0..point_count {
+        let next_index = (index + 1) % point_count;
+        area += points[index].0 * points[next_index].1;
+        area -= points[next_index].0 * points[index].1;
+    }
+
+    area * 0.5
+}
+
+fn polygon_centroid(points: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let signed_area = polygon_signed_area_f64(points);
+    if signed_area.abs() <= f64::EPSILON {
+        return None;
+    }
+
+    let mut centroid_x = 0.0;
+    let mut centroid_y = 0.0;
+
+    for index in 0..points.len() {
+        let next_index = (index + 1) % points.len();
+        let cross =
+            (points[index].0 * points[next_index].1) - (points[next_index].0 * points[index].1);
+        centroid_x += (points[index].0 + points[next_index].0) * cross;
+        centroid_y += (points[index].1 + points[next_index].1) * cross;
+    }
+
+    let factor = 1.0 / (6.0 * signed_area);
+    Some((centroid_x * factor, centroid_y * factor))
+}
+
+fn average_point(points: &[(f64, f64)]) -> (f64, f64) {
+    let point_count = points.len().max(1) as f64;
+    let sum_x = points.iter().map(|point| point.0).sum::<f64>();
+    let sum_y = points.iter().map(|point| point.1).sum::<f64>();
+    (sum_x / point_count, sum_y / point_count)
+}
+
+fn remap_clamped(value: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
+    if in_max <= in_min {
+        return out_max;
+    }
+
+    let t = ((value - in_min) / (in_max - in_min)).clamp(0.0, 1.0);
+    out_min + ((out_max - out_min) * t)
 }
 
 #[cfg(test)]
@@ -361,5 +486,35 @@ mod tests {
             adaptive_gentle_displacement > adaptive_corner_displacement,
             "gentle bends should still smooth more than sharp corners"
         );
+    }
+
+    #[test]
+    fn area_preservation_reduces_large_contour_shrinkage() {
+        let pts = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+
+        let raw = laplacian_smooth_closed_contour_step(&pts, pts.len(), 0.5, 0.0);
+        let preserved = smooth_closed_contour_multi(&pts, 0.5, 1);
+
+        let original_area = polygon_area_f64(&pts);
+        let raw_area_error = (polygon_area_f64(&raw) - original_area).abs();
+        let preserved_area_error = (polygon_area_f64(&preserved) - original_area).abs();
+
+        assert!(
+            preserved_area_error < raw_area_error,
+            "area-preserving smoothing should reduce large-contour shrinkage"
+        );
+    }
+
+    #[test]
+    fn area_preservation_skips_small_contours() {
+        let pts = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+
+        let raw = laplacian_smooth_closed_contour_step(&pts, pts.len(), 0.5, 0.0);
+        let preserved = smooth_closed_contour_multi(&pts, 0.5, 1);
+
+        for index in 0..pts.len() {
+            assert!((raw[index].0 - preserved[index].0).abs() < 1e-10);
+            assert!((raw[index].1 - preserved[index].1).abs() < 1e-10);
+        }
     }
 }

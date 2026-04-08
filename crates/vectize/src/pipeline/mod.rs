@@ -6,15 +6,19 @@
 //!
 //! 1. **Preprocessing** – normalize to RGBA8, optionally denoise
 //! 2. **Alpha compositing** – composite transparent pixels against white
-//! 3. **Color quantization** – median-cut palette reduction with deterministic refinement,
-//!    anti-aliased fringe cleanup, and adaptive flat-art palette capping
+//! 3. **Color quantization** – perceptual Oklab palette reduction with deterministic
+//!    refinement, anti-aliased fringe cleanup, adaptive flat-art palette capping,
+//!    and optional tile-aware palette assignment
 //! 4. **Contour extraction** – deterministic grid-edge tracing with hole preservation
 //! 5. **Despeckle** – remove tiny contours below the threshold
 //! 6. **Region assembly** – build color regions from contour data
-//! 7. **SVG generation** – simplification, Laplacian smoothing, curve fitting, and SVG emission
+//! 7. **SVG generation** – simplification, Laplacian smoothing, curve fitting,
+//!    same-color path merging, optional gradient approximation, and SVG emission
 
+pub(crate) mod color;
 pub mod contour;
 pub mod curves;
+pub(crate) mod gradient;
 pub mod loader;
 pub mod preprocess;
 pub mod segment;
@@ -27,10 +31,14 @@ use log::debug;
 
 use crate::config::{QualityPreset, TracingConfig};
 use crate::error::Result;
+use crate::progress::{ProgressTracker, TraceStage};
 use crate::result::{TraceDebugInfo, TraceStageMetrics, TracedRegionSummary, TracingResult};
 
 use self::contour::{contour_is_hole, Contour};
-use self::svg::{generate_svg_with_metrics, generate_svg_with_trace_space, ColorRegion};
+use self::gradient::approximate_region_gradients;
+use self::svg::{
+    generate_svg_with_metrics_and_paints, generate_svg_with_trace_space_and_paints, ColorRegion,
+};
 
 const HIGH_PRECISION_TRACE_SCALE: u32 = 2;
 const ADAPTIVE_HIGH_DETAIL_MIN_REGION_AREA_FLOOR: f64 = 2.0;
@@ -51,6 +59,15 @@ pub fn run_pipeline_with_debug(
     img: &DynamicImage,
     config: &TracingConfig,
 ) -> Result<TracingResult> {
+    let mut tracker = ProgressTracker::new(config, None);
+    run_pipeline_with_debug_and_progress(img, config, &mut tracker)
+}
+
+pub(crate) fn run_pipeline_with_debug_and_progress(
+    img: &DynamicImage,
+    config: &TracingConfig,
+    tracker: &mut ProgressTracker<'_>,
+) -> Result<TracingResult> {
     let output_width = img.width();
     let output_height = img.height();
 
@@ -61,11 +78,13 @@ pub fn run_pipeline_with_debug(
 
     // Stage 1: Preprocessing (normalization, optional denoising)
     let preprocessed = preprocess::preprocess(img, config);
+    tracker.advance(TraceStage::Preprocessed);
 
     // Stage 2: Composite transparency against the configured background color
-    let bg = config.background_color.unwrap_or((255, 255, 255));
+    let bg = config.resolved_background_color();
     let composited =
         preprocess::composite_against_background(&preprocessed, config.alpha_threshold, bg);
+    tracker.advance(TraceStage::Composited);
 
     let trace_scale = tracing_scale(config);
     let trace_image = if trace_scale > 1 {
@@ -73,7 +92,9 @@ pub fn run_pipeline_with_debug(
             "Pipeline: resampling image to a {}× tracing grid for higher precision",
             trace_scale
         );
-        preprocess::resample_for_tracing(&composited, trace_scale)
+        let resampled = preprocess::resample_for_tracing(&composited, trace_scale);
+        tracker.advance(TraceStage::Resampled);
+        resampled
     } else {
         composited
     };
@@ -84,10 +105,21 @@ pub fn run_pipeline_with_debug(
         config.color_count
     );
     let segmentation = segment::quantize(&trace_image, config);
+    tracker.advance(TraceStage::Quantized);
+
+    let coordinate_scale = 1.0 / trace_scale as f64;
+    let gradient_paints = if config.enable_svg_gradients {
+        let paints = approximate_region_gradients(&trace_image, &segmentation, coordinate_scale);
+        tracker.advance(TraceStage::GradientsApproximated);
+        Some(paints)
+    } else {
+        None
+    };
 
     // Stage 4: Contour extraction
     debug!("Pipeline: extracting contours");
     let contour_extraction = contour::extract_contours_with_stats(&segmentation);
+    tracker.advance(TraceStage::ContoursExtracted);
     let extracted_metrics = summarize_contours(&contour_extraction.contour_groups);
 
     // Stage 5: Despeckle – remove tiny contours below perimeter threshold
@@ -95,6 +127,7 @@ pub fn run_pipeline_with_debug(
         contour_extraction.contour_groups,
         config.despeckle_threshold,
     );
+    tracker.advance(TraceStage::Despeckled);
     let despeckled_metrics = summarize_contours(&contour_groups);
 
     // Stage 6: Build color regions for SVG generation
@@ -147,17 +180,24 @@ pub fn run_pipeline_with_debug(
             .collect(),
     );
     let svg_result = if trace_scale > 1 {
-        generate_svg_with_trace_space(
+        generate_svg_with_trace_space_and_paints(
             &regions,
             trace_width,
             trace_height,
             output_width,
             output_height,
-            1.0 / trace_scale as f64,
+            coordinate_scale,
             &svg_config,
+            gradient_paints.as_ref(),
         )
     } else {
-        generate_svg_with_metrics(&regions, trace_width, trace_height, &svg_config)
+        generate_svg_with_metrics_and_paints(
+            &regions,
+            trace_width,
+            trace_height,
+            &svg_config,
+            gradient_paints.as_ref(),
+        )
     };
     let stage_metrics = TraceStageMetrics::with_svg_diagnostics(
         extracted_metrics.contours,
@@ -175,6 +215,9 @@ pub fn run_pipeline_with_debug(
         svg_result.metrics.points_emitted,
         svg_result.metrics.regions_emitted,
     );
+
+    tracker.advance(TraceStage::SvgGenerated);
+    tracker.advance(TraceStage::Completed);
 
     Ok(TracingResult::with_stage_metrics(
         svg_result.svg,

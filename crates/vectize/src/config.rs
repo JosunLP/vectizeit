@@ -1,5 +1,8 @@
 //! Configuration types and quality presets for the tracing pipeline.
 
+/// The implicit background color used when no custom background is configured.
+pub const DEFAULT_BACKGROUND_COLOR: (u8, u8, u8) = (255, 255, 255);
+
 /// Quality preset for controlling the speed/quality tradeoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QualityPreset {
@@ -28,6 +31,8 @@ impl QualityPreset {
                 enable_preprocessing: true,
                 quality_preset: QualityPreset::Fast,
                 background_color: None,
+                enable_svg_gradients: false,
+                tile_size: None,
             },
             QualityPreset::Balanced => TracingConfig::default(),
             QualityPreset::High => TracingConfig {
@@ -42,6 +47,8 @@ impl QualityPreset {
                 enable_preprocessing: true,
                 quality_preset: QualityPreset::High,
                 background_color: None,
+                enable_svg_gradients: false,
+                tile_size: None,
             },
         }
     }
@@ -94,6 +101,11 @@ pub struct TracingConfig {
     /// Background color for alpha compositing and redundant-region suppression.
     /// `None` means white (255, 255, 255).
     pub background_color: Option<(u8, u8, u8)>,
+    /// Enable SVG gradient approximation for smoothly varying regions.
+    pub enable_svg_gradients: bool,
+    /// Optional tile size used for tile-aware segmentation on large images.
+    /// `None` keeps the original full-frame segmentation path.
+    pub tile_size: Option<u32>,
 }
 
 impl Default for TracingConfig {
@@ -110,11 +122,39 @@ impl Default for TracingConfig {
             enable_preprocessing: true,
             quality_preset: QualityPreset::Balanced,
             background_color: None,
+            enable_svg_gradients: false,
+            tile_size: None,
         }
     }
 }
 
 impl TracingConfig {
+    /// Resolve the effective background color for compositing and SVG emission.
+    pub fn resolved_background_color(&self) -> (u8, u8, u8) {
+        self.background_color.unwrap_or(DEFAULT_BACKGROUND_COLOR)
+    }
+
+    /// Parse a `#rrggbb` or `rrggbb` color string into an RGB tuple.
+    pub fn parse_hex_color(value: &str) -> Result<(u8, u8, u8), String> {
+        let value = value.trim();
+        let hex = value.strip_prefix('#').unwrap_or(value);
+
+        if hex.len() != 6 {
+            return Err(format!(
+                "Invalid hex color '{value}': expected 6 hex digits (e.g. \"#ff0000\")"
+            ));
+        }
+
+        let r = u8::from_str_radix(&hex[0..2], 16)
+            .map_err(|_| format!("Invalid hex color '{value}'"))?;
+        let g = u8::from_str_radix(&hex[2..4], 16)
+            .map_err(|_| format!("Invalid hex color '{value}'"))?;
+        let b = u8::from_str_radix(&hex[4..6], 16)
+            .map_err(|_| format!("Invalid hex color '{value}'"))?;
+
+        Ok((r, g, b))
+    }
+
     /// Validate the configuration, returning an error message if invalid.
     pub fn validate(&self) -> Result<(), String> {
         if !(2..=256).contains(&self.color_count) {
@@ -132,6 +172,50 @@ impl TracingConfig {
         if !(0.0..=1.0).contains(&self.corner_sensitivity) {
             return Err("corner_sensitivity must be in [0.0, 1.0]".to_string());
         }
+        if self.tile_size.is_some_and(|tile_size| tile_size < 2) {
+            return Err("tile_size must be at least 2 pixels when set".to_string());
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_background_color_defaults_to_white() {
+        assert_eq!(
+            TracingConfig::default().resolved_background_color(),
+            (255, 255, 255)
+        );
+    }
+
+    #[test]
+    fn resolved_background_color_prefers_configured_value() {
+        let config = TracingConfig {
+            background_color: Some((0x12, 0x34, 0x56)),
+            ..TracingConfig::default()
+        };
+
+        assert_eq!(config.resolved_background_color(), (0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn parse_hex_color_accepts_prefixed_and_unprefixed_values() {
+        assert_eq!(
+            TracingConfig::parse_hex_color("#123456").unwrap(),
+            (0x12, 0x34, 0x56)
+        );
+        assert_eq!(
+            TracingConfig::parse_hex_color("abcdef").unwrap(),
+            (0xab, 0xcd, 0xef)
+        );
+    }
+
+    #[test]
+    fn parse_hex_color_rejects_invalid_values() {
+        assert!(TracingConfig::parse_hex_color("#12345").is_err());
+        assert!(TracingConfig::parse_hex_color("gg0000").is_err());
     }
 }

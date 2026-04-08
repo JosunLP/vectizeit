@@ -9,13 +9,15 @@
 //!
 //! 1. **Loading** – decode the source image
 //! 2. **Preprocessing** – normalize, optionally denoise, handle transparency
-//! 3. **Segmentation** – reduce colors via median-cut quantization with deterministic
-//!    palette refinement, anti-aliased fringe cleanup, and adaptive flat-art palette capping
+//! 3. **Segmentation** – reduce colors via deterministic perceptual Oklab palette fitting,
+//!    anti-aliased fringe cleanup, adaptive flat-art palette capping, and optional tile-aware
+//!    palette assignment for large images
 //! 4. **Contour extraction** – trace deterministic grid-edge loops with hole preservation
 //! 5. **Simplification** – reduce polygon complexity with Ramer-Douglas-Peucker
 //! 6. **Contour smoothing + curve fitting** – adaptively smooth closed contours,
 //!    then fit corner-aware cubic Bezier splines
-//! 7. **SVG generation** – emit clean, valid SVG markup
+//! 7. **SVG generation** – merge same-colored path fragments, optionally fit SVG gradients for
+//!    smooth regions, and emit clean, valid SVG markup
 //!
 //! ## Quick Start
 //!
@@ -31,14 +33,18 @@
 pub mod config;
 pub mod error;
 pub mod pipeline;
+pub mod progress;
 pub mod result;
 
 pub use config::{QualityPreset, TracingConfig};
 pub use error::{Result, VectizeError};
 pub use pipeline::segment::PaletteColor;
+pub use progress::{TraceProgressUpdate, TraceStage};
 pub use result::{TraceDebugInfo, TraceStageMetrics, TracedRegionSummary, TracingResult};
 
 use std::path::Path;
+
+use progress::ProgressTracker;
 
 /// The main entry point for the tracing pipeline.
 ///
@@ -83,14 +89,62 @@ impl Tracer {
     /// This variant preserves debug-oriented data such as the quantized palette,
     /// contour summaries, and stage metrics for downstream inspection or tuning.
     pub fn trace_file_result(&self, path: impl AsRef<Path>) -> Result<TracingResult> {
+        self.trace_file_result_with_progress(path, |_| {})
+    }
+
+    /// Trace an image file and report pipeline stage completion through `progress`.
+    pub fn trace_file_result_with_progress<F>(
+        &self,
+        path: impl AsRef<Path>,
+        mut progress: F,
+    ) -> Result<TracingResult>
+    where
+        F: FnMut(TraceProgressUpdate),
+    {
         let img = pipeline::loader::load_from_file(path.as_ref())?;
-        pipeline::run_pipeline_with_debug(&img, &self.config)
+        let mut tracker = ProgressTracker::new(&self.config, Some(&mut progress));
+        tracker.advance(TraceStage::Loaded);
+        pipeline::run_pipeline_with_debug_and_progress(&img, &self.config, &mut tracker)
     }
 
     /// Trace an image from raw bytes and return a rich [`TracingResult`].
     pub fn trace_bytes_result(&self, bytes: &[u8]) -> Result<TracingResult> {
+        self.trace_bytes_result_with_progress(bytes, |_| {})
+    }
+
+    /// Trace image bytes and report pipeline stage completion through `progress`.
+    pub fn trace_bytes_result_with_progress<F>(
+        &self,
+        bytes: &[u8],
+        mut progress: F,
+    ) -> Result<TracingResult>
+    where
+        F: FnMut(TraceProgressUpdate),
+    {
         let img = pipeline::loader::load_from_bytes(bytes)?;
-        pipeline::run_pipeline_with_debug(&img, &self.config)
+        let mut tracker = ProgressTracker::new(&self.config, Some(&mut progress));
+        tracker.advance(TraceStage::Loaded);
+        pipeline::run_pipeline_with_debug_and_progress(&img, &self.config, &mut tracker)
+    }
+
+    /// Trace an image file and return the SVG string while reporting progress.
+    pub fn trace_file_with_progress<F>(&self, path: impl AsRef<Path>, progress: F) -> Result<String>
+    where
+        F: FnMut(TraceProgressUpdate),
+    {
+        Ok(self
+            .trace_file_result_with_progress(path, progress)?
+            .into_svg())
+    }
+
+    /// Trace image bytes and return the SVG string while reporting progress.
+    pub fn trace_bytes_with_progress<F>(&self, bytes: &[u8], progress: F) -> Result<String>
+    where
+        F: FnMut(TraceProgressUpdate),
+    {
+        Ok(self
+            .trace_bytes_result_with_progress(bytes, progress)?
+            .into_svg())
     }
 
     /// Return a reference to the current configuration.
@@ -160,6 +214,28 @@ mod tests {
         assert_eq!(result.height(), 2);
         assert!(!result.debug().palette().is_empty());
         assert!(result.stage_metrics().is_some());
+    }
+
+    #[test]
+    fn trace_bytes_progress_reports_stage_sequence() {
+        let tracer = Tracer::with_preset(QualityPreset::Balanced);
+        let png = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(png)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+
+        let mut stages = Vec::new();
+        tracer
+            .trace_bytes_result_with_progress(&buf.into_inner(), |update| {
+                stages.push(update.stage());
+            })
+            .unwrap();
+
+        assert_eq!(stages.first().copied(), Some(TraceStage::Loaded));
+        assert_eq!(stages.last().copied(), Some(TraceStage::Completed));
+        assert!(stages.contains(&TraceStage::Quantized));
+        assert!(stages.contains(&TraceStage::SvgGenerated));
     }
 
     #[test]
