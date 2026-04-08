@@ -120,6 +120,10 @@ const MIN_SEAM_STROKE_THICKNESS_PX: f64 = 4.5;
 const FULL_SEAM_STROKE_THICKNESS_PX: f64 = 12.0;
 const MIN_SEAM_STROKE_CENTI_PX: f64 = 8.0;
 const MAX_SEAM_STROKE_CENTI_PX: f64 = 20.0;
+const DENSE_TRACE_MIN_SEAM_STROKE_CENTI_PX: f64 = 4.0;
+const DENSE_TRACE_MAX_SEAM_STROKE_CENTI_PX: f64 = 10.0;
+const DENSE_TRACE_SEAM_WIDTH_QUANTIZATION_STEP_CENTI_PX: u8 = 2;
+const DENSE_TRACE_MEDIUM_BAND_MAX_SEAM_STROKE_CENTI_PX: u8 = 14;
 const SHARP_CORNER_COS_THRESHOLD: f64 = 0.35;
 const POLYGONAL_POINT_DENSITY_LOW: f64 = 0.05;
 const POLYGONAL_POINT_DENSITY_HIGH: f64 = 0.14;
@@ -783,7 +787,7 @@ fn build_path_data_from_indices(
             .iter()
             .map(|p| (p.x as f64 * coordinate_scale, p.y as f64 * coordinate_scale))
             .collect();
-        let profile = contour_geometry_profile(&float_pts, config);
+        let profile = contour_geometry_profile(&float_pts, coordinate_scale, config);
         let smoothed = if profile.smoothing_strength > 0.01 {
             // Derive iteration count from strength: low strength => 1 pass,
             // higher strength => more passes for stronger staircase reduction.
@@ -902,6 +906,7 @@ fn trace_space_simplification_tolerance(config: &TracingConfig, coordinate_scale
 
 fn contour_geometry_profile(
     points: &[(f64, f64)],
+    coordinate_scale: f64,
     config: &TracingConfig,
 ) -> ContourGeometryProfile {
     let thickness = contour_visual_thickness(points);
@@ -989,6 +994,7 @@ fn contour_geometry_profile(
             smoothing_strength,
             seam_bonus_centi_px,
             high_detail_edge_profile.staircase_factor,
+            coordinate_scale,
         ),
         post_smoothing_tolerance_factor,
         trace_grid_tolerance_boost,
@@ -1013,6 +1019,7 @@ fn seam_stroke_width_centi_px(
     smoothing_strength: f64,
     seam_bonus_centi_px: f64,
     staircase_factor: f64,
+    coordinate_scale: f64,
 ) -> u8 {
     if smoothing_strength <= 0.01 {
         return 0;
@@ -1024,18 +1031,49 @@ fn seam_stroke_width_centi_px(
         return 0;
     }
 
+    let trace_grid_scale_factor = remap_clamped(
+        thickness,
+        MIN_SEAM_STROKE_THICKNESS_PX,
+        FULL_SEAM_STROKE_THICKNESS_PX,
+        coordinate_scale.clamp(0.0, 1.0),
+        1.0,
+    );
+    let min_seam_width = if coordinate_scale < 1.0 {
+        (MIN_SEAM_STROKE_CENTI_PX * trace_grid_scale_factor).clamp(
+            DENSE_TRACE_MIN_SEAM_STROKE_CENTI_PX,
+            MIN_SEAM_STROKE_CENTI_PX,
+        )
+    } else {
+        MIN_SEAM_STROKE_CENTI_PX
+    };
+    let max_seam_width = if coordinate_scale < 1.0 {
+        (MAX_SEAM_STROKE_CENTI_PX * trace_grid_scale_factor).clamp(
+            DENSE_TRACE_MAX_SEAM_STROKE_CENTI_PX,
+            MAX_SEAM_STROKE_CENTI_PX,
+        )
+    } else {
+        MAX_SEAM_STROKE_CENTI_PX
+    };
+
     let base_width = remap_clamped(
         thickness,
         start_thickness,
         (start_thickness * 1.8).max(FULL_SEAM_STROKE_THICKNESS_PX),
-        MIN_SEAM_STROKE_CENTI_PX,
-        MAX_SEAM_STROKE_CENTI_PX,
+        min_seam_width,
+        max_seam_width,
     );
-    let seam_bonus = if staircase_factor >= HIGH_STAIRCASE_SEAM_GATE_FACTOR {
-        seam_bonus_centi_px * HIGH_STAIRCASE_SEAM_BONUS_SCALE
+    let staircase_seam_bonus_factor = if staircase_factor <= HIGH_STAIRCASE_SEAM_GATE_FACTOR {
+        1.0
     } else {
-        seam_bonus_centi_px
+        remap_clamped(
+            staircase_factor,
+            HIGH_STAIRCASE_SEAM_GATE_FACTOR,
+            1.0,
+            1.0,
+            HIGH_STAIRCASE_SEAM_BONUS_SCALE,
+        )
     };
+    let seam_bonus = seam_bonus_centi_px * staircase_seam_bonus_factor * trace_grid_scale_factor;
     let thin_band_penalty = if thickness < FULL_SEAM_STROKE_THICKNESS_PX {
         remap_clamped(
             thickness,
@@ -1048,9 +1086,23 @@ fn seam_stroke_width_centi_px(
         1.0
     };
 
-    ((base_width + seam_bonus) * thin_band_penalty)
+    let seam_width_centi_px = ((base_width + seam_bonus) * thin_band_penalty)
         .round()
-        .clamp(0.0, MAX_SEAM_STROKE_CENTI_PX) as u8
+        .clamp(0.0, max_seam_width) as u8;
+
+    if coordinate_scale < 1.0 && seam_width_centi_px > 0 {
+        let quantized = seam_width_centi_px
+            - (seam_width_centi_px % DENSE_TRACE_SEAM_WIDTH_QUANTIZATION_STEP_CENTI_PX);
+        let capped_medium_band = if thickness < FULL_SEAM_STROKE_THICKNESS_PX {
+            quantized.min(DENSE_TRACE_MEDIUM_BAND_MAX_SEAM_STROKE_CENTI_PX)
+        } else {
+            quantized
+        };
+
+        capped_medium_band.max(DENSE_TRACE_MIN_SEAM_STROKE_CENTI_PX as u8)
+    } else {
+        seam_width_centi_px
+    }
 }
 
 fn contour_edge_profile(points: &[(f64, f64)]) -> ContourEdgeProfile {
@@ -2014,9 +2066,49 @@ mod tests {
 
     #[test]
     fn staircase_seam_gate_does_not_require_extra_thickness() {
-        assert_eq!(seam_stroke_width_centi_px(4.0, 0.5, 6.0, 0.8), 0);
-        assert!(seam_stroke_width_centi_px(6.0, 0.5, 6.0, 0.0) > 0);
-        assert!(seam_stroke_width_centi_px(6.0, 0.5, 6.0, 0.8) > 0);
+        assert_eq!(seam_stroke_width_centi_px(4.0, 0.5, 6.0, 0.8, 1.0), 0);
+        assert!(seam_stroke_width_centi_px(6.0, 0.5, 6.0, 0.0, 1.0) > 0);
+        assert!(seam_stroke_width_centi_px(6.0, 0.5, 6.0, 0.8, 1.0) > 0);
+    }
+
+    #[test]
+    fn dense_trace_grids_scale_down_medium_band_seams_without_shrinking_broad_fills() {
+        let medium_default = seam_stroke_width_centi_px(6.0, 0.4, 6.0, 0.0, 1.0);
+        let medium_dense = seam_stroke_width_centi_px(6.0, 0.4, 6.0, 0.0, 0.5);
+        let medium_broadish_dense = seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.0, 0.5);
+        let broad_default = seam_stroke_width_centi_px(20.0, 0.4, 6.0, 0.0, 1.0);
+        let broad_dense = seam_stroke_width_centi_px(20.0, 0.4, 6.0, 0.0, 0.5);
+
+        assert!(medium_dense < medium_default);
+        assert!(medium_broadish_dense <= DENSE_TRACE_MEDIUM_BAND_MAX_SEAM_STROKE_CENTI_PX);
+        assert_eq!(broad_dense, broad_default);
+    }
+
+    #[test]
+    fn staircase_seam_bonus_tapers_gradually_above_the_gate() {
+        let near_gate = seam_stroke_width_centi_px(
+            10.0,
+            0.4,
+            10.0,
+            HIGH_STAIRCASE_SEAM_GATE_FACTOR + 0.01,
+            1.0,
+        );
+        let extreme = seam_stroke_width_centi_px(10.0, 0.4, 10.0, 1.0, 1.0);
+        let no_bonus = seam_stroke_width_centi_px(10.0, 0.4, 0.0, 1.0, 1.0);
+
+        assert!(near_gate > extreme);
+        assert!(extreme > no_bonus);
+    }
+
+    #[test]
+    fn dense_trace_grids_quantize_seam_widths_to_even_centi_pixel_steps() {
+        let dense_trace_seam = seam_stroke_width_centi_px(7.6, 0.4, 6.0, 0.2, 0.5);
+
+        assert_eq!(
+            dense_trace_seam % DENSE_TRACE_SEAM_WIDTH_QUANTIZATION_STEP_CENTI_PX,
+            0
+        );
+        assert!(dense_trace_seam >= DENSE_TRACE_MIN_SEAM_STROKE_CENTI_PX as u8);
     }
 
     #[test]
@@ -2029,8 +2121,8 @@ mod tests {
         let thin = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 2.0), (0.0, 2.0)];
         let broad = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
 
-        let thin_profile = contour_geometry_profile(&thin, &config);
-        let broad_profile = contour_geometry_profile(&broad, &config);
+        let thin_profile = contour_geometry_profile(&thin, 1.0, &config);
+        let broad_profile = contour_geometry_profile(&broad, 1.0, &config);
 
         assert!(thin_profile.smoothing_strength < broad_profile.smoothing_strength);
         assert!(thin_profile.corner_sensitivity > broad_profile.corner_sensitivity);
@@ -2060,8 +2152,8 @@ mod tests {
             (1.0, 16.0),
         ];
 
-        let polygonal_profile = contour_geometry_profile(&polygonal, &config);
-        let organic_profile = contour_geometry_profile(&organic, &config);
+        let polygonal_profile = contour_geometry_profile(&polygonal, 1.0, &config);
+        let organic_profile = contour_geometry_profile(&organic, 1.0, &config);
 
         assert!(polygonal_profile.smoothing_strength < organic_profile.smoothing_strength);
         assert!(polygonal_profile.corner_sensitivity > organic_profile.corner_sensitivity);
@@ -2078,8 +2170,8 @@ mod tests {
         let high = crate::config::QualityPreset::High.to_config();
         let broad = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
 
-        let balanced_profile = contour_geometry_profile(&broad, &balanced);
-        let high_profile = contour_geometry_profile(&broad, &high);
+        let balanced_profile = contour_geometry_profile(&broad, 1.0, &balanced);
+        let high_profile = contour_geometry_profile(&broad, 1.0, &high);
 
         assert!(
             high_profile.seam_stroke_width_centi_px > balanced_profile.seam_stroke_width_centi_px
@@ -2088,15 +2180,15 @@ mod tests {
 
     #[test]
     fn seam_stroke_width_skips_thin_regions() {
-        assert_eq!(seam_stroke_width_centi_px(2.0, 0.4, 0.0, 0.0), 0);
-        assert!(seam_stroke_width_centi_px(10.0, 0.4, 0.0, 0.0) > 0);
-        assert!(seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.8) > 0);
+        assert_eq!(seam_stroke_width_centi_px(2.0, 0.4, 0.0, 0.0, 1.0), 0);
+        assert!(seam_stroke_width_centi_px(10.0, 0.4, 0.0, 0.0, 1.0) > 0);
+        assert!(seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.8, 1.0) > 0);
         assert!(
-            seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.8)
-                > seam_stroke_width_centi_px(10.0, 0.4, 0.0, 0.8)
+            seam_stroke_width_centi_px(10.0, 0.4, 10.0, 0.8, 1.0)
+                > seam_stroke_width_centi_px(10.0, 0.4, 0.0, 0.8, 1.0)
         );
         assert_eq!(
-            seam_stroke_width_centi_px(40.0, 0.8, 40.0, 0.0),
+            seam_stroke_width_centi_px(40.0, 0.8, 40.0, 0.0, 1.0),
             MAX_SEAM_STROKE_CENTI_PX as u8
         );
     }
