@@ -1,17 +1,53 @@
 {
   "name": "vectizeit",
   "version": "0.1.0",
-  "description": "Utilities for vectorization workflows.",
+  "description": "Installable native CLI wrapper for vectizeit raster-to-SVG tracing.",
   "license": "MIT",
-  "scripts": {},
-  "keywords": [
-    "vector",
-    "typescript",
-    "utilities"
-  ],
-  "author": "",
-  "engines": {
-    "node": ">=24"
+  "author": "JosunLP",
+  "type": "module",
+  "bin": {
+    "trace": "./bin/trace.js",
+    "vectizeit": "./bin/trace.js"
   },
-  "devDependencies": {}
+  "files": [
+    "bin/",
+    "npm/",
+    "install.sh",
+    "install.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node ./npm/postinstall.mjs",
+    "preuninstall": "node ./npm/preuninstall.mjs",
+    "test": "node --test ./npm/tests/github.test.mjs ./npm/tests/platform.test.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "cli",
+    "image",
+    "rust",
+    "svg",
+    "trace",
+    "vectorization"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JosunLP/vectizeit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JosunLP/vectizeit/issues"
+  },
+  "homepage": "https://github.com/JosunLP/vectizeit#readme",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "extract-zip": "^2.0.1",
+    "tar": "^7.4.3"
+  }
 }

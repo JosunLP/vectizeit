@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  verify:
+    name: Verify release metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Ensure manifest versions match the tag
+        run: node ./scripts/verify-release-version.mjs "${GITHUB_REF_NAME}"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+            binary: trace
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            binary: trace
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            binary: trace
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            binary: trace.exe
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        run: cargo build --locked --release -p vectize-cli --target ${{ matrix.target }}
+
+      - name: Package release archive (Unix)
+        if: runner.os != 'Windows'
+        id: package_unix
+        shell: bash
+        run: |
+          asset_name="vectizeit-${{ matrix.target }}.${{ matrix.archive }}"
+          staging_dir="$RUNNER_TEMP/package"
+          mkdir -p "$staging_dir"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$staging_dir/${{ matrix.binary }}"
+          cp README.md LICENSE "$staging_dir/"
+          tar -C "$staging_dir" -czf "$asset_name" "${{ matrix.binary }}" README.md LICENSE
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+
+      - name: Package release archive (Windows)
+        if: runner.os == 'Windows'
+        id: package_windows
+        shell: pwsh
+        run: |
+          $AssetName = "vectizeit-${{ matrix.target }}.${{ matrix.archive }}"
+          $StagingDir = Join-Path $env:RUNNER_TEMP "package"
+          New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" (Join-Path $StagingDir "${{ matrix.binary }}") -Force
+          Copy-Item README.md, LICENSE $StagingDir -Force
+          Compress-Archive -Path (Join-Path $StagingDir '*') -DestinationPath $AssetName -Force
+          "asset_name=$AssetName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload packaged artifact
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.package_unix.outputs.asset_name }}
+
+      - name: Upload packaged artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.package_windows.outputs.asset_name }}
+
+  publish-release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum vectizeit-* > checksums.txt
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/vectizeit-*
+            dist/checksums.txt
+
+  publish-npm:
+    name: Publish npm package
+    needs:
+      - verify
+      - publish-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm dependencies without postinstall downloads
+        run: npm install --ignore-scripts
+
+      - name: Publish package to npm
+        # Requires an NPM_TOKEN repository secret with publish access.
+        run: npm publish --access public --provenance --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets['NPM_TOKEN'] }}

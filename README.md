@@ -6,13 +6,100 @@ High-quality raster-to-vector image tracing tool and library written in Rust.
 multi-stage processing pipeline — from color quantization and contour tracing to Bezier curve
 fitting and SVG emission.
 
+The repository now ships:
+
+- checksum-verified one-line installers for **Windows**, **macOS**, and **Linux**
+- a global **npm package** that downloads the matching native CLI automatically
+- **GitHub Actions CI/CD** for Rust validation, packaging checks, release archives, checksums, and npm publishing
+
+---
+
+## Install, Update, and Uninstall
+
+The published installers expose both `trace` and `vectizeit` commands. Release downloads are
+verified against the `checksums.txt` file attached to each GitHub release before anything is installed.
+
+### macOS and Linux
+
+```bash
+# Install the latest release
+curl -fsSL https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.sh | sh
+
+# Update to the latest release
+curl -fsSL https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.sh | sh -s -- --update
+
+# Install a specific version
+curl -fsSL https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.sh | sh -s -- --version 0.1.0
+
+# Uninstall
+curl -fsSL https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.sh | sh -s -- --uninstall
+```
+
+By default the installer uses `/usr/local/bin` when it is writable, otherwise it falls back to
+`~/.local/bin`. Set `VECTIZEIT_INSTALL_DIR` or pass `--install-dir` to override that location.
+
+### Windows (PowerShell)
+
+```powershell
+# Install the latest release
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.ps1)))
+
+# Update to the latest release
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.ps1))) -Update
+
+# Install a specific version
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.ps1))) -Version 0.1.0
+
+# Uninstall
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JosunLP/vectizeit/main/install.ps1))) -Uninstall
+```
+
+The Windows installer places the binaries in `%LOCALAPPDATA%\Programs\VectizeIt\bin` by default,
+adds that directory to the user `PATH`, and also supports `VECTIZEIT_INSTALL_DIR` or `-InstallDir`.
+
+### npm package
+
+```bash
+# Install globally via npm (downloads the matching native binary)
+npm install -g vectizeit
+
+# Update the installed CLI
+npm update -g vectizeit
+
+# Uninstall
+npm uninstall -g vectizeit
+```
+
+The npm package runs a `postinstall` step that downloads the release archive for the current platform,
+verifies its SHA-256 checksum, and stores it inside the package's local `vendor/` directory. The
+same package exposes both `trace` and `vectizeit` commands.
+
 ---
 
 ## Repository Layout
 
 ```bash
 vectizeit/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml              # Rust + npm + installer validation
+│       └── release.yml         # Tagged release builds + GitHub release + npm publish
 ├── Cargo.toml                  # Workspace manifest
+├── package.json                # npm wrapper for the native CLI
+├── install.sh                  # One-line installer / updater / uninstaller for macOS + Linux
+├── install.ps1                 # One-line installer / updater / uninstaller for Windows
+├── bin/
+│   └── trace.js                # npm launcher that proxies to the native binary
+├── npm/
+│   ├── lib/
+│   │   ├── github.mjs          # Release URL helpers and metadata
+│   │   ├── installer.mjs       # Native binary download, verify, extract, cleanup
+│   │   └── platform.mjs        # Platform/target mapping for release assets
+│   ├── postinstall.mjs         # npm install hook
+│   ├── preuninstall.mjs        # npm uninstall hook
+│   └── tests/                  # npm package regression tests (5 tests)
+├── scripts/
+│   └── verify-release-version.mjs # Version parity check for npm + Cargo manifests
 ├── crates/
 │   ├── vectize/                # Core library crate
 │   │   ├── src/
@@ -70,9 +157,22 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 ```
 
+For npm/package validation:
+
+```bash
+# Install JS dependencies without downloading release binaries in a repo checkout
+npm install --ignore-scripts
+
+# Run npm package tests
+npm test
+
+# Inspect the publishable npm tarball contents
+npm pack --dry-run
+```
+
 ### Test Coverage
 
-The project includes **182 automated tests** across five categories:
+The project includes **187 automated tests** across six categories:
 
 | Category          | Location                                      | Tests |
 | ----------------- | --------------------------------------------- | ----- |
@@ -81,6 +181,7 @@ The project includes **182 automated tests** across five categories:
 | CLI smoke tests   | `crates/vectize-cli/tests/cli_smoke_tests.rs` | 19    |
 | WASM unit tests   | `crates/vectize-wasm/src/lib.rs`              | 1     |
 | Doc tests         | `crates/vectize/src/lib.rs`                   | 1     |
+| npm package tests | `npm/tests/*.test.mjs`                        | 5     |
 
 Test types include:
 
@@ -88,9 +189,29 @@ Test types include:
 - **Configuration validation** – all presets and error cases
 - **Golden / snapshot tests** – deterministic output verification
 - **CLI smoke tests** – help text, convert, batch, presets, options, error cases
+- **npm package tests** – release URL generation, platform mapping, and vendored binary path resolution
 - **Edge cases** – 1×1 images, max colors, transparent images, no smoothing
 
 The `trace` binary is produced at `target/release/trace` (or `target/debug/trace` for debug builds).
+
+### GitHub Actions automation
+
+The repository now includes two workflows:
+
+- `.github/workflows/ci.yml`
+  - runs `cargo fmt --check`
+  - runs `cargo clippy --all-targets --all-features -- -D warnings`
+  - runs `cargo test --all-targets --all-features`
+  - runs `npm test` and `npm pack --dry-run`
+  - parser-checks `install.sh` and `install.ps1`
+  - verifies that `package.json` and all crate versions stay aligned
+- `.github/workflows/release.yml`
+  - triggers on version tags like `v0.1.0`
+  - verifies manifest/tag version parity
+  - builds release archives for Linux, macOS (Intel + Apple Silicon), and Windows
+  - generates `checksums.txt` for every published release asset
+  - publishes the GitHub release artifacts and the npm package with provenance enabled
+  - expects an `NPM_TOKEN` repository secret for the npm publish step
 
 ---
 
